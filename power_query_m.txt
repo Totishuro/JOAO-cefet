@@ -1,0 +1,27 @@
+// This Power Query script demonstrates how to transform the original CEFET survey Excel
+// into the cleaned CSV used in the dashboard.  Adjust the file path below to your
+// environment when using in Power BI Desktop.
+
+let
+    // Change this to the path of your original Excel file
+    Source = Excel.Workbook(File.Contents("C:\\path\\to\\Dados CEFET_MG - Sem dados pessoais (2).xlsx"), null, true),
+    Sheet  = Source{0}[Data],
+    Promote= Table.PromoteHeaders(Sheet, [PromoteAllScalars=true]),
+    // Trim and remove empty strings
+    Trimmed = Table.TransformColumns(Promote, List.Transform(Table.ColumnNames(Promote), each {_, each if _ is text then Text.Trim(_) else _, type any})),
+    BlanksToNull = Table.TransformColumns(Trimmed, List.Transform(Table.ColumnNames(Trimmed), each {_, each if _="" then null else _, type any})),
+    // Ensure expected columns exist; rename if necessary
+    Renamed = BlanksToNull,
+    // Convert Likert responses (1–5) stored as text to numbers
+    ToNumber = Table.TransformColumns(Renamed, {
+        {"infra_index_100", each if _ = null then null else Number.From(_), type number},
+        {"acess_index_100", each if _ = null then null else Number.From(_), type number},
+        {"empre_index_100", each if _ = null then null else Number.From(_), type number},
+        {"risco_evasao_score", each if _ = null then null else Number.From(_), type number},
+        {"engajamento_projetos", each if _ = null then null else Number.From(_), type number}
+    }),
+    // Parse timestamp
+    ParseDate = Table.TransformColumns(ToNumber, {{"created_at", each if _ = null then null else DateTime.From(_), type datetime}})
+
+in
+    ParseDate
