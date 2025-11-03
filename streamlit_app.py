@@ -1,442 +1,256 @@
-import streamlit as st
+# streamlit_app.py
+# -*- coding: utf-8 -*-
+# App: CEFET-MG Survey Explorer (Streamlit)
+# Observação importante do Vinícius: NÃO remover "duplicados" por respondent_id,
+# pois respostas de múltipla escolha foram normalizadas em linhas. Somente linhas
+# 100% idênticas podem ser consideradas duplicadas técnicas.
+
+import io
+import os
+import textwrap
+import numpy as np
 import pandas as pd
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import numpy as np
-from io import BytesIO
 
-# Configuração da página
-st.set_page_config(
-    page_title="Dashboard CEFET/MG - Pesquisa Empreendedorismo",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+st.set_page_config(page_title="CEFET-MG • Pesquisas", layout="wide")
+
+# --------------------------------------------------------------------------------------
+# CONFIGURAÇÕES
+# --------------------------------------------------------------------------------------
+DEFAULT_FILE = "Dados CEFET_MG - Sem dados pessoais (2).xlsx"
+
+KPI_IDADE_COL = "IDADE"                 # Ajuste se o nome estiver diferente
+RESP_ID_COL   = "respondent_id"         # Chave de respondente
+
+HELP_DUP = (
+    "Não deduplica por respondent_id. Múltipla escolha foi expandida em linhas. "
+    "Somente linhas **100% idênticas** podem ser consideradas duplicadas técnicas."
 )
 
-# CSS customizado
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        text-align: center;
-    }
-    .section-header {
-        font-size: 1.8rem;
-        color: #2c3e50;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-        border-bottom: 3px solid #1f77b4;
-        padding-bottom: 0.5rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# --------------------------------------------------------------------------------------
+# FUNÇÕES AUXILIARES
+# --------------------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def read_excel(file) -> pd.DataFrame:
+    return pd.read_excel(file, engine="openpyxl")
 
+def has_col(df: pd.DataFrame, col: str) -> bool:
+    return col in df.columns
 
-def processar_dados(df):
-    """Processa e limpa os dados do DataFrame"""
-    # Remover duplicatas baseado no respondent_id
-    df_unique = df.drop_duplicates(subset=['respondent_id'], keep='first')
-    
-    # Estatísticas de duplicação
-    total_linhas = len(df)
-    total_unicos = len(df_unique)
-    linhas_duplicadas = total_linhas - total_unicos
-    
-    return df_unique, {
-        'total_linhas': total_linhas,
-        'total_unicos': total_unicos,
-        'linhas_duplicadas': linhas_duplicadas,
-        'pct_duplicacao': (linhas_duplicadas / total_linhas * 100) if total_linhas > 0 else 0
-    }
+def kpis_basicos(df: pd.DataFrame) -> dict:
+    total_respostas = len(df)
+    total_resp = df[RESP_ID_COL].nunique() if has_col(df, RESP_ID_COL) else None
+    linhas_dups_tecnicas = int(df.duplicated(keep="first").sum())  # somente linhas 100% iguais
+    pct_dups_tecnicas = (linhas_dups_tecnicas / total_respostas) if total_respostas else 0.0
 
+    # "Linhas por respondent" NÃO é duplicidade a remover — serve só como diagnóstico.
+    linhas_por_resp = (total_respostas / total_resp) if (total_respostas and total_resp) else None
 
-def criar_metricas_gerais(df, stats):
-    """Cria as métricas gerais do dashboard"""
-    st.markdown('<h2 class="section-header">📊 Visão Geral</h2>', unsafe_allow_html=True)
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
-    
-    with col1:
-        st.metric("Total de Respondentes", f"{stats['total_unicos']:,}")
-    
-    with col2:
-        idade_media = df['IDADE'].mean()
-        st.metric("Idade Média", f"{idade_media:.1f} anos")
-    
-    with col3:
-        total_alunos = len(df[df['VOCE É'] == 'SOU ALUNO(A) DE GRADUAÇÃO.'])
-        pct_alunos = (total_alunos / stats['total_unicos'] * 100)
-        st.metric("Alunos Atuais", f"{pct_alunos:.1f}%", f"{total_alunos:,} alunos")
-    
-    with col4:
-        total_fundadores = len(df[df['Você é sócio(a) ou fundador(a) de alguma empresa?Response'] == 'Sim'])
-        pct_fundadores = (total_fundadores / stats['total_unicos'] * 100)
-        st.metric("Fundadores/Sócios", f"{pct_fundadores:.1f}%", f"{total_fundadores:,} pessoas")
-    
-    with col5:
-        total_cursos = df['CURSO DE GRADUAÇÃO OF'].nunique()
-        st.metric("Cursos Diferentes", f"{total_cursos}")
-
-
-def criar_analise_perfil(df):
-    """Cria análise do perfil dos respondentes"""
-    st.markdown('<h2 class="section-header">👥 Perfil dos Respondentes</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Gráfico de distribuição por perfil
-        perfil_counts = df['VOCE É'].value_counts()
-        fig_perfil = px.pie(
-            values=perfil_counts.values,
-            names=perfil_counts.index,
-            title='Distribuição por Perfil',
-            color_discrete_sequence=px.colors.qualitative.Set3
-        )
-        fig_perfil.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig_perfil, use_container_width=True)
-    
-    with col2:
-        # Gráfico de distribuição por faixa etária
-        df['Faixa Etária'] = pd.cut(
-            df['IDADE'],
-            bins=[0, 19, 25, 30, 100],
-            labels=['Até 19 anos', '20-25 anos', '26-30 anos', 'Acima de 30 anos']
-        )
-        faixa_counts = df['Faixa Etária'].value_counts().sort_index()
-        fig_idade = px.bar(
-            x=faixa_counts.index,
-            y=faixa_counts.values,
-            title='Distribuição por Faixa Etária',
-            labels={'x': 'Faixa Etária', 'y': 'Quantidade'},
-            color=faixa_counts.values,
-            color_continuous_scale='Blues'
-        )
-        st.plotly_chart(fig_idade, use_container_width=True)
-
-
-def criar_analise_cursos(df):
-    """Cria análise de distribuição por cursos"""
-    st.markdown('<h2 class="section-header">🎓 Distribuição por Cursos</h2>', unsafe_allow_html=True)
-    
-    # Top 15 cursos
-    curso_counts = df['CURSO DE GRADUAÇÃO OF'].value_counts().head(15)
-    
-    fig_cursos = px.bar(
-        x=curso_counts.values,
-        y=curso_counts.index,
-        orientation='h',
-        title='Top 15 Cursos com Mais Respondentes',
-        labels={'x': 'Quantidade de Respondentes', 'y': 'Curso'},
-        color=curso_counts.values,
-        color_continuous_scale='Viridis'
+    result = dict(
+        total_respostas=total_respostas,
+        total_respondentes=total_resp,
+        linhas_dups_tecnicas=linhas_dups_tecnicas,
+        pct_dups_tecnicas=pct_dups_tecnicas,
+        linhas_por_respondente=linhas_por_resp,
     )
-    fig_cursos.update_layout(height=600, showlegend=False)
-    st.plotly_chart(fig_cursos, use_container_width=True)
-    
-    # Tabela com todos os cursos
-    with st.expander("Ver todos os cursos"):
-        curso_df = df['CURSO DE GRADUAÇÃO OF'].value_counts().reset_index()
-        curso_df.columns = ['Curso', 'Quantidade']
-        curso_df['Percentual'] = (curso_df['Quantidade'] / len(df) * 100).round(2)
-        st.dataframe(curso_df, use_container_width=True)
+    return result
 
+def idade_stats(df: pd.DataFrame) -> dict:
+    if not has_col(df, KPI_IDADE_COL):
+        return {}
+    # Garante 1 idade por respondente para cálculo (equivalente ao SUMMARIZE no DAX)
+    subset_cols = [c for c in [RESP_ID_COL, KPI_IDADE_COL] if has_col(df, c)]
+    base = df.drop_duplicates(subset=subset_cols)
+    serie = pd.to_numeric(base[KPI_IDADE_COL], errors="coerce").dropna()
+    if serie.empty:
+        return {}
+    return dict(
+        idade_media=float(serie.mean()),
+        idade_min=int(serie.min()),
+        idade_max=int(serie.max())
+    )
 
-def criar_analise_empreendedorismo(df):
-    """Cria análise sobre empreendedorismo"""
-    st.markdown('<h2 class="section-header">🚀 Empreendedorismo</h2>', unsafe_allow_html=True)
-    
-    col1, col2, col3 = st.columns(3)
-    
-    # Conceitos de empreendedorismo
-    conceitos = {
-        'Abrir Negócio': 'O que você entende como empreendedorismo?Empreendedorismo é abrir o próprio negócio (empresa)',
-        'Fazer Bem Social': 'O que você entende como empreendedorismo?Empreendedorismo é fazer algo bom para a sociedade',
-        'Melhorar Ambiente': 'O que você entende como empreendedorismo?Empreendedorismo é melhorar o ambiente no qual estou inserido'
-    }
-    
-    conceitos_data = []
-    for nome, coluna in conceitos.items():
-        if coluna in df.columns:
-            count = df[coluna].notna().sum()
-            conceitos_data.append({'Conceito': nome, 'Quantidade': count})
-    
-    if conceitos_data:
-        conceitos_df = pd.DataFrame(conceitos_data)
-        fig_conceitos = px.bar(
-            conceitos_df,
-            x='Conceito',
-            y='Quantidade',
-            title='Conceitos de Empreendedorismo',
-            color='Quantidade',
-            color_continuous_scale='Sunset'
-        )
-        st.plotly_chart(fig_conceitos, use_container_width=True)
-    
-    # Participação em projetos
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if '"Considero que, durante a graduação, EU contribui para o crescimento de um ou mais projetos na Instituição de Ensino Superior."Response' in df.columns:
-            contribuiu_col = '"Considero que, durante a graduação, EU contribui para o crescimento de um ou mais projetos na Instituição de Ensino Superior."Response'
-            contribuiu = df[contribuiu_col].value_counts()
-            fig_contribuiu = px.pie(
-                values=contribuiu.values,
-                names=contribuiu.index,
-                title='Contribuição para Projetos na IES'
-            )
-            st.plotly_chart(fig_contribuiu, use_container_width=True)
-    
-    with col2:
-        if 'Você é sócio(a) ou fundador(a) de alguma empresa?Response' in df.columns:
-            fundador = df['Você é sócio(a) ou fundador(a) de alguma empresa?Response'].value_counts()
-            fig_fundador = px.pie(
-                values=fundador.values,
-                names=fundador.index,
-                title='Sócios/Fundadores de Empresas',
-                color_discrete_sequence=['#2ecc71', '#e74c3c']
-            )
-            st.plotly_chart(fig_fundador, use_container_width=True)
+def freq_por_linha(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    # Contagem simples por linha
+    s = df[col].dropna()
+    vc = s.value_counts()
+    out = vc.rename_axis(col).reset_index(name="qtd_linhas")
+    return out
 
+def freq_por_respondente(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    # Considera presença da categoria (ao menos 1x) por respondente
+    if not has_col(df, RESP_ID_COL):
+        return pd.DataFrame(columns=[col, "respondentes"])
+    aux = (
+        df[[RESP_ID_COL, col]]
+        .dropna()
+        .drop_duplicates(subset=[RESP_ID_COL, col])
+        .assign(flag=1)
+    )
+    g = aux.groupby(col, dropna=False)["flag"].sum().rename("respondentes").reset_index()
+    # Percentual sobre o total de respondentes
+    total_resp = df[RESP_ID_COL].nunique()
+    if total_resp and total_resp > 0:
+        g["pct_respondentes"] = g["respondentes"] / total_resp
+    return g.sort_values("respondentes", ascending=False)
 
-def criar_analise_professores(df):
-    """Cria análise sobre características dos professores"""
-    st.markdown('<h2 class="section-header">👨‍🏫 Avaliação dos Professores</h2>', unsafe_allow_html=True)
-    
-    # Características dos professores
-    caracteristicas_prof = {
-        'Inconformismo': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Inconformismo com a realidade e disposição para transformá-la',
-        'Visão Oportunidades': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Visão para oportunidades',
-        'Pensamento Inovador': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Pensamento inovador e criativo',
-        'Coragem para Riscos': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Coragem para tomar riscos',
-        'Curiosidade': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Curiosidade',
-        'Comunicação': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Facilidade de comunicação das ideias e sociabilidade',
-        'Planejamento': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Planejamento de atividades',
-        'Apoio Iniciativas': 'O quanto as seguintes características estão presentes nos(as) PROFESSORES(AS) da minha Instituição de Ensino Superior?Caso não saiba avaliar alguma delas, marcar a opção "Não observado"Apoio a iniciativas empreendedoras'
-    }
-    
-    caracteristicas_data = []
-    for nome, coluna in caracteristicas_prof.items():
-        if coluna in df.columns:
-            # Assumindo valores numéricos (ajustar conforme necessário)
-            media = pd.to_numeric(df[coluna], errors='coerce').mean()
-            caracteristicas_data.append({'Característica': nome, 'Média': media})
-    
-    if caracteristicas_data:
-        caract_df = pd.DataFrame(caracteristicas_data).sort_values('Média', ascending=True)
-        fig_prof = px.bar(
-            caract_df,
-            x='Média',
-            y='Característica',
-            orientation='h',
-            title='Características Empreendedoras dos Professores (Média)',
-            color='Média',
-            color_continuous_scale='RdYlGn',
-            range_color=[0, 5]
-        )
-        fig_prof.update_layout(height=500)
-        st.plotly_chart(fig_prof, use_container_width=True)
+def pct(n: float) -> str:
+    return f"{n*100:,.2f}%"
+
+def card_kpi(label: str, value, help_text: str | None = None, fmt: str | None = None):
+    with st.container(border=True):
+        st.caption(label)
+        if value is None:
+            st.write("—")
+        else:
+            if fmt == "int":
+                st.subheader(f"{int(value):,}".replace(",", "."))
+            elif fmt == "pct":
+                st.subheader(pct(value))
+            elif fmt == "float1":
+                st.subheader(f"{value:.1f}")
+            else:
+                st.subheader(str(value))
+        if help_text:
+            st.caption(help_text)
+
+# --------------------------------------------------------------------------------------
+# SIDEBAR
+# --------------------------------------------------------------------------------------
+st.sidebar.title("Configurações")
+st.sidebar.info(HELP_DUP)
+
+uploaded = st.sidebar.file_uploader(
+    "Faça upload do Excel (xlsx)", type=["xlsx"], accept_multiple_files=False
+)
+
+use_default = st.sidebar.checkbox(
+    f"Usar arquivo padrão do repositório ({DEFAULT_FILE}) quando não houver upload",
+    value=True,
+)
+
+agg_mode = st.sidebar.radio(
+    "Modo de agregação para gráficos categóricos",
+    ["Por linha", "Por respondente (presença ≥1x)"],
+    index=1,
+    help=(
+        "Por linha: cada linha conta 1 ocorrência. "
+        "Por respondente: cada categoria conta **uma vez por respondente**, "
+        "útil para perguntas de múltipla escolha normalizadas em linhas."
+    ),
+)
+
+top_n = st.sidebar.slider("Top N categorias no gráfico", min_value=5, max_value=30, value=10, step=1)
+
+# --------------------------------------------------------------------------------------
+# CARGA DE DADOS
+# --------------------------------------------------------------------------------------
+df = None
+src = None
+
+if uploaded is not None:
+    df = read_excel(uploaded)
+    src = f"Upload: {uploaded.name}"
+elif use_default and Path(DEFAULT_FILE).exists():
+    df = read_excel(DEFAULT_FILE)
+    src = f"Arquivo padrão: {DEFAULT_FILE}"
+
+st.caption(f"Fonte de dados: {src or '—'}")
+
+if df is None:
+    st.warning("Envie um Excel para começar ou habilite o arquivo padrão no menu lateral.")
+    st.stop()
+
+# Normalização leve de colunas (apenas tira espaços nas extremidades)
+df.columns = [str(c).strip() for c in df.columns]
+
+# --------------------------------------------------------------------------------------
+# KPIs (equivalentes aos mapeados para o Power BI)
+# --------------------------------------------------------------------------------------
+st.markdown("### KPIs Gerais")
+col1, col2, col3, col4, col5 = st.columns(5)
+
+kpi = kpis_basicos(df)
+with col1:
+    card_kpi("Total de linhas (respostas)", kpi["total_respostas"], fmt="int")
+with col2:
+    card_kpi("Respondentes únicos", kpi["total_respondentes"], fmt="int")
+with col3:
+    card_kpi("Linhas duplicadas técnicas", kpi["linhas_dups_tecnicas"], HELP_DUP, fmt="int")
+with col4:
+    card_kpi("% duplicadas técnicas", kpi["pct_dups_tecnicas"], HELP_DUP, fmt="pct")
+with col5:
+    card_kpi("Média de linhas por respondente", kpi["linhas_por_respondente"], fmt="float1")
+
+idade = idade_stats(df)
+if idade:
+    c1, c2, c3 = st.columns(3)
+    with c1: card_kpi("Idade média", idade["idade_media"], fmt="float1")
+    with c2: card_kpi("Idade mínima", idade["idade_min"], fmt="int")
+    with c3: card_kpi("Idade máxima", idade["idade_max"], fmt="int")
+
+# --------------------------------------------------------------------------------------
+# EXPLORADOR DE COLUNAS
+# --------------------------------------------------------------------------------------
+st.markdown("### Explorador de Colunas")
+with st.expander("Prévia do dataset"):
+    st.dataframe(df.head(50), use_container_width=True, height=300)
+
+# Seleção de colunas categóricas candidatas
+cat_cols_guess = (
+    df.select_dtypes(include=["object"]).columns.tolist()
+    + [c for c in df.columns if "?" in c or "O quanto" in c or "Qual" in c or "Quais" in c]
+)
+cat_cols_guess = sorted(list(dict.fromkeys(cat_cols_guess)))  # unique + keep order
+
+sel_cols = st.multiselect(
+    "Selecione colunas para analisar (categóricas):",
+    options=cat_cols_guess or df.columns.tolist(),
+    default=[c for c in cat_cols_guess if c != RESP_ID_COL][:3],
+    help="Dica: escolha perguntas/itens categóricos. Para múltipla escolha expandida em linhas, use **Por respondente**."
+)
+
+for col in sel_cols:
+    st.markdown(f"#### {col}")
+    if agg_mode.startswith("Por linha"):
+        base = freq_por_linha(df, col).head(top_n)
+        if base.empty:
+            st.info("Sem dados nesta coluna.")
+            continue
+        fig = px.bar(base.head(top_n), x="qtd_linhas", y=col, orientation="h", title=f"Top {top_n} por linha")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(base, use_container_width=True, hide_index=True)
     else:
-        st.info("As colunas de características dos professores precisam ser convertidas para valores numéricos.")
+        base = freq_por_respondente(df, col).head(top_n)
+        if base.empty:
+            st.info("Sem dados nesta coluna.")
+            continue
+        # Exibe tanto contagem de respondentes quanto percentual
+        fig = px.bar(base.head(top_n), x="respondentes", y=col, orientation="h",
+                     title=f"Top {top_n} por respondente (presença ≥1x)")
+        st.plotly_chart(fig, use_container_width=True)
 
+        base2 = base.copy()
+        if "pct_respondentes" in base2.columns:
+            base2["pct_respondentes"] = (base2["pct_respondentes"] * 100).round(2)
+        st.dataframe(base2, use_container_width=True, hide_index=True)
 
-def criar_analise_infraestrutura(df):
-    """Cria análise sobre infraestrutura"""
-    st.markdown('<h2 class="section-header">🏢 Infraestrutura</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Infraestrutura Geral")
-        infra_geral = {
-            'Biblioteca': 'Como você avalia a qualidade da infraestrutura oferecida pela sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Biblioteca',
-            'Lab Informática': 'Como você avalia a qualidade da infraestrutura oferecida pela sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Laboratórios de informática',
-            'Lab Pesquisa': 'Como você avalia a qualidade da infraestrutura oferecida pela sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Laboratórios de pesquisa e experimentação',
-            'Espaços Convivência': 'Como você avalia a qualidade da infraestrutura oferecida pela sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Espaços abertos ou de convivência'
-        }
-        
-        infra_data = []
-        for nome, coluna in infra_geral.items():
-            if coluna in df.columns:
-                media = pd.to_numeric(df[coluna], errors='coerce').mean()
-                infra_data.append({'Item': nome, 'Média': media})
-        
-        if infra_data:
-            infra_df = pd.DataFrame(infra_data)
-            fig_infra = px.bar(
-                infra_df,
-                x='Item',
-                y='Média',
-                title='Avaliação da Infraestrutura',
-                color='Média',
-                color_continuous_scale='Blues'
-            )
-            st.plotly_chart(fig_infra, use_container_width=True)
-    
-    with col2:
-        st.subheader("Acessibilidade (PCD)")
-        infra_pcd = {
-            'Calçadas': 'Como você avalia a qualidade da infraestrutura destinada à pessoas com deficiência na sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Calçadas e vias de passeios acessíveis',
-            'Vias Acesso': 'Como você avalia a qualidade da infraestrutura destinada à pessoas com deficiência na sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Vias de acesso às edificações acessíveis',
-            'Sanitários': 'Como você avalia a qualidade da infraestrutura destinada à pessoas com deficiência na sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Sanitários acessíveis',
-            'Elevadores': 'Como você avalia a qualidade da infraestrutura destinada à pessoas com deficiência na sua Instituição de Ensino Superior?Caso não saiba avaliar algum deles (seja por desconhecer ou por não ter experienciado ensino presencial), marcar a opção "Não observado"Elevadores e rampas acessíveis'
-        }
-        
-        pcd_data = []
-        for nome, coluna in infra_pcd.items():
-            if coluna in df.columns:
-                media = pd.to_numeric(df[coluna], errors='coerce').mean()
-                pcd_data.append({'Item': nome, 'Média': media})
-        
-        if pcd_data:
-            pcd_df = pd.DataFrame(pcd_data)
-            fig_pcd = px.bar(
-                pcd_df,
-                x='Item',
-                y='Média',
-                title='Avaliação de Acessibilidade',
-                color='Média',
-                color_continuous_scale='Greens'
-            )
-            st.plotly_chart(fig_pcd, use_container_width=True)
+# --------------------------------------------------------------------------------------
+# DOWNLOADS
+# --------------------------------------------------------------------------------------
+st.markdown("### Exportar KPIs")
+kpi_out = {**kpi, **{f"idade_{k}": v for k, v in idade.items()}} if idade else {**kpi}
+kpi_df = pd.DataFrame([kpi_out])
 
+colx, _ = st.columns([1, 3])
+with colx:
+    st.download_button(
+        "Baixar KPIs (CSV)",
+        data=kpi_df.to_csv(index=False).encode("utf-8"),
+        file_name="kpis_cefet.csv",
+        mime="text/csv",
+    )
 
-def main():
-    """Função principal do aplicativo"""
-    
-    # Header
-    st.markdown('<h1 class="main-header">📊 Dashboard CEFET/MG - Pesquisa Empreendedorismo</h1>', unsafe_allow_html=True)
-    st.markdown("---")
-    
-    # Sidebar
-    with st.sidebar:
-        st.image("https://via.placeholder.com/200x80/1f77b4/ffffff?text=CEFET-MG", use_container_width=True)
-        st.markdown("### 📁 Upload de Dados")
-        st.markdown("Faça upload do arquivo Excel com os dados da pesquisa.")
-        
-        uploaded_file = st.file_uploader(
-            "Selecione o arquivo Excel",
-            type=['xlsx', 'xls'],
-            help="Arquivo deve conter a coluna 'respondent_id' como identificador único"
-        )
-        
-        st.markdown("---")
-        st.markdown("### ℹ️ Sobre")
-        st.info(
-            "Este dashboard analisa os dados da pesquisa sobre empreendedorismo "
-            "e educação superior no CEFET/MG. **MVP v1.0**"
-        )
-    
-    # Processamento dos dados
-    if uploaded_file is not None:
-        try:
-            # Mostrar spinner enquanto carrega
-            with st.spinner('Carregando e processando dados...'):
-                # Ler arquivo Excel
-                df = pd.read_excel(uploaded_file)
-                
-                # Verificar se tem a coluna respondent_id
-                if 'respondent_id' not in df.columns:
-                    st.error("❌ O arquivo deve conter a coluna 'respondent_id'")
-                    return
-                
-                # Processar dados
-                df_processed, stats = processar_dados(df)
-                
-                st.success(f"✅ Arquivo carregado com sucesso! {stats['total_unicos']:,} respondentes únicos encontrados.")
-            
-            # Mostrar alerta de duplicação se houver
-            if stats['linhas_duplicadas'] > 0:
-                st.warning(
-                    f"⚠️ Foram encontradas e removidas {stats['linhas_duplicadas']:,} linhas duplicadas "
-                    f"({stats['pct_duplicacao']:.2f}% do total)"
-                )
-            
-            # Criar tabs para organizar o conteúdo
-            tab1, tab2, tab3, tab4, tab5 = st.tabs([
-                "📊 Visão Geral",
-                "👥 Perfil",
-                "🚀 Empreendedorismo",
-                "👨‍🏫 Professores",
-                "🏢 Infraestrutura"
-            ])
-            
-            with tab1:
-                criar_metricas_gerais(df_processed, stats)
-                criar_analise_cursos(df_processed)
-            
-            with tab2:
-                criar_analise_perfil(df_processed)
-            
-            with tab3:
-                criar_analise_empreendedorismo(df_processed)
-            
-            with tab4:
-                criar_analise_professores(df_processed)
-            
-            with tab5:
-                criar_analise_infraestrutura(df_processed)
-            
-            # Botão para download dos dados processados
-            st.markdown("---")
-            st.markdown("### 💾 Download dos Dados Processados")
-            
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_processed.to_excel(writer, index=False, sheet_name='Dados_Limpos')
-            
-            st.download_button(
-                label="📥 Baixar dados processados (Excel)",
-                data=output.getvalue(),
-                file_name="dados_cefet_processados.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-        except Exception as e:
-            st.error(f"❌ Erro ao processar o arquivo: {str(e)}")
-            st.exception(e)
-    
-    else:
-        # Tela inicial
-        st.info("👆 Faça upload do arquivo Excel no menu lateral para começar a análise.")
-        
-        st.markdown("### 📋 Requisitos do Arquivo")
-        st.markdown("""
-        - Formato: Excel (.xlsx ou .xls)
-        - Deve conter a coluna **respondent_id** como identificador único
-        - Estrutura baseada na pesquisa de empreendedorismo CEFET/MG
-        """)
-        
-        st.markdown("### 📊 Funcionalidades")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("""
-            **Análises Disponíveis:**
-            - ✅ Visão geral com KPIs principais
-            - ✅ Perfil dos respondentes
-            - ✅ Distribuição por cursos
-            - ✅ Análise de empreendedorismo
-            """)
-        
-        with col2:
-            st.markdown("""
-            **Recursos:**
-            - ✅ Remoção automática de duplicatas
-            - ✅ Visualizações interativas
-            - ✅ Download de dados processados
-            - ✅ Interface responsiva
-            """)
-
-
-if __name__ == "__main__":
-    main()
+st.caption("Versão do app: 1.0 • Construído para o cenário do CEFET-MG • Streamlit")
