@@ -1,545 +1,365 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import unicodedata
 import re
+import csv
 
-# ===== Configuração =====
+# =============================
+# Configuração básica
+# =============================
 st.set_page_config(
     page_title="Dashboard CEFET-MG",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# CSS para mobile responsivo
+# =============================
+# Estilos (Mobile first)
+# =============================
 st.markdown("""
 <style>
-    /* Mobile First */
-    .main-header {
-        font-size: 1.5rem;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    
-    .section-header {
-        font-size: 1.3rem;
-        color: #2c3e50;
-        margin-top: 1.5rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #1f77b4;
-        padding-bottom: 0.5rem;
-    }
-    
-    /* Tablet e Desktop */
+    .main-header { font-size: 1.6rem; color: #1f77b4; text-align:center; margin: 0.5rem 0 1rem; }
+    .section-header { font-size: 1.2rem; color:#2c3e50; margin:1.2rem 0 0.8rem; border-bottom:2px solid #1f77b4; padding-bottom:0.4rem; }
     @media (min-width: 768px) {
-        .main-header {
-            font-size: 2.5rem;
-        }
-        .section-header {
-            font-size: 1.8rem;
-        }
-    }
-    
-    /* Melhorias de acessibilidade */
-    .stButton>button {
-        width: 100%;
-    }
-    
-    /* Tabelas responsivas */
-    .dataframe {
-        font-size: 0.9rem;
+        .main-header { font-size: 2.2rem; }
+        .section-header { font-size: 1.6rem; }
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Funções de Mapeamento =====
-def load_column_mapping():
-    """Carrega o mapeamento de colunas do CSV"""
-    csv_path = Path("columns_classification.csv")
-    
-    if csv_path.exists():
-        mapping_df = pd.read_csv(csv_path)
-        
-        # Criar dicionários de mapeamento
-        col_to_tech = dict(zip(mapping_df['coluna_original'], mapping_df['nome_tecnico']))
-        tech_to_label = dict(zip(mapping_df['nome_tecnico'], mapping_df['rotulo_publico']))
-        tech_to_class = dict(zip(mapping_df['nome_tecnico'], mapping_df['classe']))
-        
-        return col_to_tech, tech_to_label, tech_to_class
-    else:
-        st.warning("⚠️ Arquivo columns_classification.csv não encontrado. Usando nomes originais.")
-        return {}, {}, {}
+# =============================
+# Utilidades
+# =============================
+def slugify_pt(text: str) -> str:
+    """Converte cabeçalhos variados para um nome técnico estável (snake_case, sem acentos)."""
+    if not isinstance(text, str):
+        text = str(text)
 
-def apply_mapping(df, col_to_tech):
-    """Aplica o mapeamento de colunas ao DataFrame"""
-    if not col_to_tech:
-        return df
-    
-    # Renomear apenas colunas que existem no mapping
-    cols_to_rename = {orig: tech for orig, tech in col_to_tech.items() if orig in df.columns}
-    return df.rename(columns=cols_to_rename)
+    # remove BOM e espaços
+    text = text.replace("\ufeff", "").strip()
 
-# ===== Funções de Processamento =====
-@st.cache_data(show_spinner=False)
-def load_excel(file):
-    """Carrega arquivo Excel"""
-    return pd.read_excel(file, engine='openpyxl')
+    # normaliza acentos
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
 
-def process_data(df):
-    """Remove duplicatas e retorna estatísticas"""
-    if 'respondent_id' not in df.columns:
-        st.error("❌ Coluna 'respondent_id' não encontrada!")
-        return None, None
-    
-    df_unique = df.drop_duplicates(subset=['respondent_id'], keep='first')
-    
-    stats = {
-        'total_linhas': len(df),
-        'total_unicos': len(df_unique),
-        'duplicadas': len(df) - len(df_unique)
-    }
-    
-    return df_unique, stats
+    # substituições frequentes
+    text = text.lower()
+    text = re.sub(r'["“”’‘]', "", text)
+    text = text.replace("(", " ").replace(")", " ")
+    text = text.replace("/", " ").replace("\\", " ")
+    text = text.replace(" – ", " ").replace(" — ", " ").replace("-", " ")
+    text = text.replace("  ", " ")
 
-# ===== Visualizações =====
-def show_kpis(df, stats, tech_to_label):
-    """Mostra KPIs principais"""
-    st.markdown('<h2 class="section-header">📊 Visão Geral</h2>', unsafe_allow_html=True)
-    
-    # Adaptar layout para mobile
-    if st.session_state.get('mobile_view', False):
-        cols = st.columns(2)
-    else:
-        cols = st.columns(4)
-    
-    with cols[0]:
-        st.metric("📝 Total Respondentes", f"{stats['total_unicos']:,}")
-    
-    with cols[1]:
-        # Buscar coluna de idade
-        idade_col = 'idade' if 'idade' in df.columns else None
-        if idade_col and idade_col in df.columns:
-            media_idade = df[idade_col].mean()
-            st.metric("👤 Idade Média", f"{media_idade:.1f} anos")
+    # converte para snake_case
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text[:120]  # limite de segurança
+
+def robust_read_mapping(file_obj_or_path):
+    """
+    Lê o CSV de mapeamento tentando variações de encoding/separador.
+    Deve conter as colunas:
+      - coluna_original
+      - nome_tecnico
+      - rotulo_publico
+      - classe
+    """
+    attempts = [
+        dict(sep=",", encoding="utf-8-sig", engine="python", on_bad_lines="skip", quoting=csv.QUOTE_MINIMAL),
+        dict(sep=";", encoding="utf-8-sig", engine="python", on_bad_lines="skip", quoting=csv.QUOTE_MINIMAL),
+        dict(sep=",", encoding="latin-1", engine="python", on_bad_lines="skip", quoting=csv.QUOTE_MINIMAL),
+        dict(sep=";", encoding="latin-1", engine="python", on_bad_lines="skip", quoting=csv.QUOTE_MINIMAL),
+    ]
+    last_err = None
+    for kw in attempts:
+        try:
+            df = pd.read_csv(file_obj_or_path, **kw)
+            # normaliza nomes esperados das colunas do mapping
+            df.columns = [slugify_pt(c) for c in df.columns]
+            # aliases aceitos
+            aliases = {
+                "coluna_original": {"coluna_original", "original", "coluna", "header_original"},
+                "nome_tecnico": {"nome_tecnico", "tecnico", "nome_padrao", "slug"},
+                "rotulo_publico": {"rotulo_publico", "rotulo", "label_publico", "label"},
+                "classe": {"classe", "categoria", "grupo"},
+            }
+            rename_map = {}
+            for target, opts in aliases.items():
+                for c in df.columns:
+                    if c in opts:
+                        rename_map[c] = target
+                        break
+            df = df.rename(columns=rename_map)
+
+            required = {"coluna_original", "nome_tecnico", "rotulo_publico", "classe"}
+            if not required.issubset(df.columns):
+                missing = required - set(df.columns)
+                raise ValueError(f"CSV de mapeamento ausente de colunas obrigatórias: {missing}")
+            return df
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err if last_err else RuntimeError("Falha ao ler CSV de mapeamento.")
+
+def load_column_mapping(uploaded_mapping=None):
+    """
+    Carrega o mapeamento (CSV) a partir de:
+      1) Upload do usuário (prioritário)
+      2) Arquivo 'columns_classification.csv' no diretório
+      3) Sem mapeamento → tenta normalização automática de nomes
+    Retorna: (col_to_tech, tech_to_label, tech_to_class, mapping_sourcestr)
+    """
+    # 1) Se o usuário fez upload
+    if uploaded_mapping is not None:
+        try:
+            df = robust_read_mapping(uploaded_mapping)
+            col_to_tech = dict(zip(df["coluna_original"], df["nome_tecnico"]))
+            tech_to_label = dict(zip(df["nome_tecnico"], df["rotulo_publico"]))
+            tech_to_class = dict(zip(df["nome_tecnico"], df["classe"]))
+            return col_to_tech, tech_to_label, tech_to_class, "CSV (upload)"
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao ler CSV enviado: {e}. Vou tentar o arquivo local.")
+
+    # 2) Arquivo local
+    local = Path("columns_classification.csv")
+    if local.exists():
+        try:
+            df = robust_read_mapping(local)
+            col_to_tech = dict(zip(df["coluna_original"], df["nome_tecnico"]))
+            tech_to_label = dict(zip(df["nome_tecnico"], df["rotulo_publico"]))
+            tech_to_class = dict(zip(df["nome_tecnico"], df["classe"]))
+            return col_to_tech, tech_to_label, tech_to_class, "CSV (local)"
+        except Exception as e:
+            st.error(f"❌ columns_classification.csv encontrado, mas ilegível: {e}. Usando nomes automáticos.")
+
+    # 3) Sem CSV
+    st.info("ℹ️ Mapeamento não fornecido. Usarei nomes técnicos automáticos.")
+    return {}, {}, {}, "Automático"
+
+def apply_mapping_or_slugify(df: pd.DataFrame, col_to_tech: dict) -> pd.DataFrame:
+    """Aplica o mapping. Se vazio, cria nomes técnicos automáticos estáveis com slugify_pt."""
+    if col_to_tech:
+        rename = {orig: tech for orig, tech in col_to_tech.items() if orig in df.columns}
+        return df.rename(columns=rename)
+
+    # sem CSV → gerar nomes técnicos automaticamente
+    new_cols = {}
+    for c in df.columns:
+        if c == "respondent_id":
+            new_cols[c] = c
         else:
-            st.metric("👤 Idade Média", "N/A")
-    
-    if len(cols) > 2:
-        with cols[2]:
-            # Alunos atuais
-            voce_col = 'voce_e' if 'voce_e' in df.columns else None
-            if voce_col:
-                total_alunos = df[voce_col].str.contains('ALUNO', case=False, na=False).sum()
-                pct = (total_alunos / stats['total_unicos'] * 100)
-                st.metric("🎓 Alunos Atuais", f"{pct:.1f}%")
-            else:
-                st.metric("🎓 Alunos Atuais", "N/A")
-        
-        with cols[3]:
-            # Fundadores
-            fundador_col = 'socio_ou_fundador' if 'socio_ou_fundador' in df.columns else None
-            if fundador_col:
-                total_fundadores = (df[fundador_col] == 'Sim').sum()
-                pct = (total_fundadores / stats['total_unicos'] * 100)
-                st.metric("🚀 Fundadores", f"{pct:.1f}%")
-            else:
-                st.metric("🚀 Fundadores", "N/A")
+            new_cols[c] = slugify_pt(c)
+    df2 = df.rename(columns=new_cols)
+    return df2
 
-def show_profile_analysis(df, tech_to_label):
-    """Análise de perfil dos respondentes"""
-    st.markdown('<h2 class="section-header">👥 Perfil dos Respondentes</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("Distribuição por Perfil")
-        voce_col = 'voce_e' if 'voce_e' in df.columns else None
+@st.cache_data(show_spinner=False)
+def read_excel(file):
+    return pd.read_excel(file, engine="openpyxl")
+
+def compute_stats(df: pd.DataFrame) -> dict:
+    stats = {
+        "total_linhas": int(len(df)),
+        "total_respostas_unicas": int(len(df.drop_duplicates())),
+        "linhas_duplicadas_exatas": int(df.duplicated().sum()),
+    }
+    if "respondent_id" in df.columns:
+        stats["respondentes_unicos"] = int(df["respondent_id"].nunique())
+    else:
+        stats["respondentes_unicos"] = None
+    return stats
+
+# =============================
+# Visualizações
+# =============================
+def show_kpis(df, stats):
+    st.markdown('<h2 class="section-header">📊 Visão Geral</h2>', unsafe_allow_html=True)
+    cols = st.columns(4)
+    with cols[0]:
+        st.metric("Linhas (total)", f"{stats['total_linhas']:,}")
+    with cols[1]:
+        st.metric("Linhas únicas (exatas)", f"{stats['total_respostas_unicas']:,}")
+    with cols[2]:
+        st.metric("Duplicadas (exatas)", f"{stats['linhas_duplicadas_exatas']:,}")
+    with cols[3]:
+        if stats["respondentes_unicos"] is not None:
+            st.metric("Respondentes únicos", f"{stats['respondentes_unicos']:,}")
+        else:
+            st.metric("Respondentes únicos", "—")
+
+def show_profile(df):
+    st.markdown('<h2 class="section-header">👥 Perfil</h2>', unsafe_allow_html=True)
+    idade_col = "idade" if "idade" in df.columns else None
+    voce_col = "voce_e" if "voce_e" in df.columns else None
+
+    c1, c2 = st.columns(2)
+    with c1:
         if voce_col:
-            perfil_counts = df[voce_col].value_counts()
-            st.bar_chart(perfil_counts)
-            
-            # Tabela detalhada
-            with st.expander("Ver detalhes"):
-                perfil_df = perfil_counts.reset_index()
-                perfil_df.columns = ['Perfil', 'Quantidade']
-                perfil_df['%'] = (perfil_df['Quantidade'] / perfil_df['Quantidade'].sum() * 100).round(2)
-                st.dataframe(perfil_df, use_container_width=True)
+            st.subheader("Distribuição por Perfil")
+            st.bar_chart(df[voce_col].value_counts())
         else:
             st.info("Coluna de perfil não encontrada")
-    
-    with col2:
-        st.subheader("Distribuição por Idade")
-        idade_col = 'idade' if 'idade' in df.columns else None
-        if idade_col:
-            # Criar faixas etárias
-            df_temp = df.copy()
-            df_temp['faixa_etaria'] = pd.cut(
-                df_temp[idade_col],
-                bins=[0, 19, 25, 30, 100],
-                labels=['Até 19', '20-25', '26-30', 'Acima de 30']
-            )
-            faixa_counts = df_temp['faixa_etaria'].value_counts().sort_index()
-            st.bar_chart(faixa_counts)
-            
-            # Estatísticas
+
+    with c2:
+        if idade_col and pd.api.types.is_numeric_dtype(df[idade_col]):
+            st.subheader("Idade")
+            st.metric("Média", f"{df[idade_col].mean():.1f}")
             st.metric("Mínima", f"{df[idade_col].min():.0f}")
             st.metric("Máxima", f"{df[idade_col].max():.0f}")
         else:
-            st.info("Coluna de idade não encontrada")
+            st.info("Coluna de idade não encontrada ou não numérica")
 
-def show_courses_analysis(df, tech_to_label):
-    """Análise de cursos"""
-    st.markdown('<h2 class="section-header">🎓 Análise de Cursos</h2>', unsafe_allow_html=True)
-    
-    curso_col = 'curso_graduacao' if 'curso_graduacao' in df.columns else None
-    
-    if not curso_col:
-        st.info("Coluna de curso não encontrada")
-        return
-    
-    # Top 15 cursos
-    curso_counts = df[curso_col].value_counts().head(15)
-    
-    st.subheader("Top 15 Cursos")
-    st.bar_chart(curso_counts)
-    
-    # Tabela completa
-    with st.expander("Ver todos os cursos"):
-        all_courses = df[curso_col].value_counts().reset_index()
-        all_courses.columns = ['Curso', 'Quantidade']
-        all_courses['%'] = (all_courses['Quantidade'] / len(df) * 100).round(2)
-        st.dataframe(all_courses, use_container_width=True)
-
-def show_entrepreneurship_analysis(df, tech_to_label):
-    """Análise de empreendedorismo"""
-    st.markdown('<h2 class="section-header">🚀 Empreendedorismo</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Conceitos de Empreendedorismo")
-        conceitos = {
-            'conceito_empreendedorismo_abrir_negocio': 'Abrir negócio',
-            'conceito_empreendedorismo_impacto_social': 'Impacto social',
-            'conceito_empreendedorismo_melhorar_ambiente': 'Melhorar ambiente'
-        }
-        
-        conceito_data = {}
-        for col, label in conceitos.items():
-            if col in df.columns:
-                count = df[col].notna().sum()
-                conceito_data[label] = count
-        
-        if conceito_data:
-            st.bar_chart(conceito_data)
-    
-    with col2:
-        st.subheader("Fundadores/Sócios")
-        fundador_col = 'socio_ou_fundador' if 'socio_ou_fundador' in df.columns else None
-        if fundador_col:
-            fundador_counts = df[fundador_col].value_counts()
-            st.bar_chart(fundador_counts)
-            
-            # Percentual
-            if 'Sim' in fundador_counts.index:
-                pct = (fundador_counts['Sim'] / len(df) * 100)
-                st.metric("Percentual de Fundadores", f"{pct:.1f}%")
-        else:
-            st.info("Dados não disponíveis")
-    
-    # Contribuição para projetos
-    st.subheader("Contribuição para Projetos")
-    contrib_col = 'contribuiu_crescimento_projetos' if 'contribuiu_crescimento_projetos' in df.columns else None
-    if contrib_col:
-        contrib_counts = df[contrib_col].value_counts()
-        st.bar_chart(contrib_counts)
-    else:
-        st.info("Dados não disponíveis")
-
-def show_professors_analysis(df, tech_to_label):
-    """Análise dos professores"""
-    st.markdown('<h2 class="section-header">👨‍🏫 Avaliação dos Professores</h2>', unsafe_allow_html=True)
-    
-    # Características dos professores
+def show_professores(df):
+    st.markdown('<h2 class="section-header">👨‍🏫 Professores</h2>', unsafe_allow_html=True)
     prof_cols = {
-        'professores_inconformismo_transformacao': 'Inconformismo',
-        'professores_visao_oportunidades': 'Visão',
-        'professores_pensamento_inovador_criativo': 'Inovação',
-        'professores_coragem_riscos': 'Coragem',
-        'professores_curiosidade': 'Curiosidade',
-        'professores_comunicacao_sociabilidade': 'Comunicação',
-        'professores_planejamento_atividades': 'Planejamento',
-        'professores_apoio_iniciativas': 'Apoio'
+        "professores_inconformismo_transformacao": "Inconformismo",
+        "professores_visao_oportunidades": "Visão",
+        "professores_pensamento_inovador_criativo": "Inovação",
+        "professores_coragem_riscos": "Coragem",
+        "professores_curiosidade": "Curiosidade",
+        "professores_comunicacao_sociabilidade": "Comunicação",
+        "professores_planejamento_atividades": "Planejamento",
+        "professores_apoio_iniciativas": "Apoio",
     }
-    
-    prof_data = {}
+    data = {}
     for col, label in prof_cols.items():
         if col in df.columns:
-            # Converter para numérico e calcular média
-            valores = pd.to_numeric(df[col], errors='coerce')
-            media = valores.mean()
-            if not pd.isna(media):
-                prof_data[label] = media
-    
-    if prof_data:
-        st.subheader("Características Empreendedoras")
-        st.bar_chart(prof_data)
-        
-        # Média geral
-        media_geral = np.mean(list(prof_data.values()))
-        st.metric("Média Geral", f"{media_geral:.2f}")
+            vals = pd.to_numeric(df[col], errors="coerce")
+            if vals.notna().any():
+                data[label] = vals.mean()
+    if data:
+        st.bar_chart(data)
     else:
-        st.info("Dados não disponíveis")
-    
-    # Experiência e acessibilidade
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Experiência no Mercado")
-        exp_col = 'professores_experiencia_mercado' if 'professores_experiencia_mercado' in df.columns else None
-        if exp_col:
-            exp_counts = df[exp_col].value_counts()
-            st.bar_chart(exp_counts)
-    
-    with col2:
-        st.subheader("Acessibilidade para Apoiar")
-        acess_col = 'professores_acessiveis_apoiar_iniciativas' if 'professores_acessiveis_apoiar_iniciativas' in df.columns else None
-        if acess_col:
-            acess_counts = df[acess_col].value_counts()
-            st.bar_chart(acess_counts)
+        st.info("Sem colunas de avaliação dos professores após mapeamento.")
 
-def show_infrastructure_analysis(df, tech_to_label):
-    """Análise de infraestrutura"""
+def show_infra(df):
     st.markdown('<h2 class="section-header">🏢 Infraestrutura</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Infraestrutura Geral")
-        infra_cols = {
-            'infraestrutura_biblioteca': 'Biblioteca',
-            'infraestrutura_labs_informatica': 'Labs Informática',
-            'infraestrutura_labs_pesquisa_exper': 'Labs Pesquisa',
-            'infraestrutura_espacos_convivencia': 'Espaços Convivência',
-            'infraestrutura_restaurante': 'Restaurante'
-        }
-        
-        infra_data = {}
-        for col, label in infra_cols.items():
-            if col in df.columns:
-                valores = pd.to_numeric(df[col], errors='coerce')
-                media = valores.mean()
-                if not pd.isna(media):
-                    infra_data[label] = media
-        
-        if infra_data:
-            st.bar_chart(infra_data)
-        else:
-            st.info("Dados não disponíveis")
-    
-    with col2:
-        st.subheader("Acessibilidade (PCD)")
-        acess_cols = {
-            'acessibilidade_calcadas_vias': 'Calçadas',
-            'acessibilidade_vias_acesso_edificacoes': 'Vias Acesso',
-            'acessibilidade_rota_interna': 'Rotas Internas',
-            'acessibilidade_sanitarios': 'Sanitários',
-            'acessibilidade_elevadores_rampas': 'Elevadores'
-        }
-        
-        acess_data = {}
-        for col, label in acess_cols.items():
-            if col in df.columns:
-                valores = pd.to_numeric(df[col], errors='coerce')
-                media = valores.mean()
-                if not pd.isna(media):
-                    acess_data[label] = media
-        
-        if acess_data:
-            st.bar_chart(acess_data)
-        else:
-            st.info("Dados não disponíveis")
-    
-    # Internet
-    st.subheader("Qualidade da Internet")
-    internet_cols = {
-        'internet_disponibilidade_acesso': 'Disponibilidade',
-        'internet_velocidade_wifi': 'Velocidade WiFi'
+    infra_cols = {
+        "infraestrutura_biblioteca": "Biblioteca",
+        "infraestrutura_labs_informatica": "Labs Informática",
+        "infraestrutura_labs_pesquisa_exper": "Labs Pesquisa",
+        "infraestrutura_espacos_convivencia": "Espaços Convivência",
+        "infraestrutura_restaurante": "Restaurante",
     }
-    
-    internet_data = {}
+    data = {}
+    for col, label in infra_cols.items():
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            if vals.notna().any():
+                data[label] = vals.mean()
+    if data:
+        st.bar_chart(data)
+    else:
+        st.info("Sem colunas de infraestrutura após mapeamento.")
+
+def show_internet(df):
+    st.markdown('<h2 class="section-header">🌐 Internet</h2>', unsafe_allow_html=True)
+    internet_cols = {
+        "internet_disponibilidade_acesso": "Disponibilidade",
+        "internet_velocidade_wifi": "Velocidade Wi‑Fi",
+    }
+    data = {}
     for col, label in internet_cols.items():
         if col in df.columns:
-            valores = pd.to_numeric(df[col], errors='coerce')
-            media = valores.mean()
-            if not pd.isna(media):
-                internet_data[label] = media
-    
-    if internet_data:
-        st.bar_chart(internet_data)
+            vals = pd.to_numeric(df[col], errors="coerce")
+            if vals.notna().any():
+                data[label] = vals.mean()
+    if data:
+        st.bar_chart(data)
     else:
-        st.info("Dados não disponíveis")
+        st.info("Sem colunas de internet após mapeamento.")
 
-def show_retention_analysis(df, tech_to_label):
-    """Análise de permanência e evasão"""
+def show_permanencia_evasao(df):
     st.markdown('<h2 class="section-header">📌 Permanência e Evasão</h2>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Motivos de Permanência")
-        perm_col = 'permanencia_motivos' if 'permanencia_motivos' in df.columns else None
-        if perm_col and df[perm_col].notna().sum() > 0:
-            # Contar menções
-            all_motivos = df[perm_col].dropna().str.split(',').explode()
-            motivos_counts = all_motivos.value_counts().head(10)
-            st.bar_chart(motivos_counts)
+    c1, c2 = st.columns(2)
+    with c1:
+        col_perm = "permanencia_motivos"
+        if col_perm in df.columns and df[col_perm].notna().any():
+            top = df[col_perm].dropna().astype(str).str.split(",").explode().str.strip()
+            st.bar_chart(top.value_counts().head(12))
         else:
-            st.info("Dados não disponíveis")
-    
-    with col2:
-        st.subheader("Motivos de Evasão")
-        evasao_col = 'evasao_motivos' if 'evasao_motivos' in df.columns else None
-        if evasao_col and df[evasao_col].notna().sum() > 0:
-            all_evasao = df[evasao_col].dropna().str.split(',').explode()
-            evasao_counts = all_evasao.value_counts().head(10)
-            st.bar_chart(evasao_counts)
+            st.info("Sem coluna de motivos de permanência após mapeamento.")
+    with c2:
+        col_eva = "evasao_motivos"
+        if col_eva in df.columns and df[col_eva].notna().any():
+            top = df[col_eva].dropna().astype(str).str.split(",").explode().str.strip()
+            st.bar_chart(top.value_counts().head(12))
         else:
-            st.info("Dados não disponíveis")
+            st.info("Sem coluna de motivos de evasão após mapeamento.")
 
-# ===== MAIN =====
+# =============================
+# MAIN
+# =============================
 def main():
-    # Header
     st.markdown('<h1 class="main-header">📊 Dashboard CEFET-MG</h1>', unsafe_allow_html=True)
-    st.markdown("### Pesquisa sobre Empreendedorismo e Educação Superior")
-    st.markdown("---")
-    
-    # Carregar mapeamento
-    col_to_tech, tech_to_label, tech_to_class = load_column_mapping()
-    
-    # Sidebar
+    st.caption("Pesquisa sobre Empreendedorismo e Educação Superior — MVP")
+
     with st.sidebar:
-        st.markdown("### 📁 Upload de Dados")
-        uploaded_file = st.file_uploader(
-            "Selecione o arquivo Excel",
-            type=['xlsx', 'xls'],
-            help="Arquivo deve conter a coluna 'respondent_id'"
-        )
-        
-        # Detectar visualização mobile
-        if st.checkbox("📱 Modo Mobile", value=False):
-            st.session_state['mobile_view'] = True
-        else:
-            st.session_state['mobile_view'] = False
-        
+        st.subheader("📁 Dados")
+        uploaded = st.file_uploader("Excel (.xlsx)", type=["xlsx", "xls"])
+        mapping_upload = st.file_uploader("CSV de mapeamento (opcional)", type=["csv"])
         st.markdown("---")
-        st.markdown("### ℹ️ Sobre")
-        st.info("Dashboard MVP v1.0 - CEFET/MG")
-    
-    # Processar dados
-    if uploaded_file:
-        try:
-            with st.spinner('📥 Carregando dados...'):
-                df = load_excel(uploaded_file)
-                
-                # Aplicar mapeamento
-                df = apply_mapping(df, col_to_tech)
-                
-                # Processar
-                df_processed, stats = process_data(df)
-                
-                if df_processed is None:
-                    return
-                
-                st.success(f"✅ {stats['total_unicos']:,} respondentes carregados!")
-                
-                if stats['duplicadas'] > 0:
-                    st.warning(f"⚠️ {stats['duplicadas']:,} duplicatas removidas")
-            
-            # Tabs de navegação
-            tabs = st.tabs([
-                "📊 Geral",
-                "👥 Perfil",
-                "🎓 Cursos",
-                "🚀 Empreendedorismo",
-                "👨‍🏫 Professores",
-                "🏢 Infraestrutura",
-                "📌 Permanência"
-            ])
-            
-            with tabs[0]:
-                show_kpis(df_processed, stats, tech_to_label)
-                with st.expander("🔍 Ver dados brutos"):
-                    st.dataframe(df_processed.head(100), use_container_width=True)
-            
-            with tabs[1]:
-                show_profile_analysis(df_processed, tech_to_label)
-            
-            with tabs[2]:
-                show_courses_analysis(df_processed, tech_to_label)
-            
-            with tabs[3]:
-                show_entrepreneurship_analysis(df_processed, tech_to_label)
-            
-            with tabs[4]:
-                show_professors_analysis(df_processed, tech_to_label)
-            
-            with tabs[5]:
-                show_infrastructure_analysis(df_processed, tech_to_label)
-            
-            with tabs[6]:
-                show_retention_analysis(df_processed, tech_to_label)
-            
-            # Download
-            st.markdown("---")
-            st.markdown("### 💾 Download")
-            csv = df_processed.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Baixar dados processados (CSV)",
-                csv,
-                "dados_cefet_processados.csv",
-                "text/csv"
-            )
-            
-        except Exception as e:
-            st.error(f"❌ Erro: {str(e)}")
-            st.exception(e)
-    
-    else:
-        # Tela inicial
-        st.info("👆 Faça upload do arquivo Excel no menu lateral")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("### 📋 Requisitos")
-            st.markdown("""
-            - Formato Excel (.xlsx)
-            - Coluna `respondent_id` obrigatória
-            - Arquivo `columns_classification.csv` na raiz
-            """)
-        
-        with col2:
-            st.markdown("### 📊 Análises")
-            st.markdown("""
-            - Perfil dos respondentes
-            - Cursos e distribuições
-            - Empreendedorismo
-            - Avaliação de professores
-            - Infraestrutura e acessibilidade
-            - Permanência e evasão
-            """)
+        st.checkbox("📱 Modo Mobile", value=False, key="mobile_view")
+
+    if uploaded is None:
+        st.info("Faça upload do Excel na barra lateral. Você pode, opcionalmente, enviar um CSV de mapeamento.")
+        st.markdown("**Dica:** Sem CSV, os nomes técnicos serão criados automaticamente a partir dos cabeçalhos.")
+        return
+
+    # Carrega dados
+    try:
+        df_raw = read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Erro ao ler Excel: {e}")
+        return
+
+    # Carrega mapping (se houver)
+    col_to_tech, tech_to_label, tech_to_class, src_map = load_column_mapping(mapping_upload)
+
+    # Aplica mapping ou slugify
+    df = apply_mapping_or_slugify(df_raw, col_to_tech)
+
+    # KPIs
+    stats = compute_stats(df)
+    with st.expander("📑 Visão de dados (amostra)", expanded=False):
+        st.write(df.head(20))
+
+    show_kpis(df, stats)
+
+    # Abas
+    tabs = st.tabs(["👥 Perfil", "👨‍🏫 Professores", "🏢 Infraestrutura", "🌐 Internet", "📌 Permanência/Evasão", "⬇️ Exportar"])
+
+    with tabs[0]:
+        show_profile(df)
+    with tabs[1]:
+        show_professores(df)
+    with tabs[2]:
+        show_infra(df)
+    with tabs[3]:
+        show_internet(df)
+    with tabs[4]:
+        show_permanencia_evasao(df)
+    with tabs[5]:
+        st.download_button(
+            label="Baixar CSV processado",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="dados_processados.csv",
+            mime="text/csv",
+        )
+
+    # Rodapé com info do mapping
+    st.caption(f"Origem do mapeamento: {src_map}")
+    if col_to_tech:
+        with st.expander("🔎 Dicionário de dados (mapeamento ativo)"):
+            dict_df = pd.DataFrame([
+                {"coluna_original": k, "nome_tecnico": v, "rotulo_publico": tech_to_label.get(v, ""), "classe": tech_to_class.get(v, "")}
+                for k, v in col_to_tech.items()
+            ]).sort_values("nome_tecnico")
+            st.dataframe(dict_df, use_container_width=True)
+
 
 if __name__ == "__main__":
     main()
