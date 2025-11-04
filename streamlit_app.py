@@ -9,6 +9,87 @@ st.set_page_config(page_title="CEFET-MG | Dashboard", layout="wide")
 
 DEFAULT_FILE = "data/dados_cefet.xlsx"
 
+import re
+import unicodedata
+import pandas as pd
+
+def _slugify(txt: str) -> str:
+    txt = unicodedata.normalize("NFKD", txt)
+    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
+    txt = re.sub(r"[^a-zA-Z0-9]+", "_", txt).strip("_").lower()
+    return re.sub(r"_+", "_", txt)
+
+def _clean_question(q: str) -> str:
+    # remove instruções e observações repetitivas
+    q = re.sub(r'Caso não saiba avaliar.*$', '', q, flags=re.IGNORECASE).strip()
+    q = re.sub(r'Considerando o respondido na questão anterior,?\s*', '', q, flags=re.IGNORECASE)
+    q = q.replace('"', '').replace("“","").replace("”","")
+    return re.sub(r'\s+', ' ', q).strip()
+
+_PATTERNS = [
+    # Infra PCD
+    (re.compile(r'Como você avalia a qualidade da infraestrutura destinada .*?\?\s*(.+)$', re.IGNORECASE),
+     "Infra PCD", "Acessibilidade • {item}", "acessibilidade_{slug}"),
+    # Infra Geral
+    (re.compile(r'Como você avalia a qualidade da infraestrutura oferecida .*?\?\s*(.+)$', re.IGNORECASE),
+     "Infra Geral", "Infraestrutura • {item}", "infraestrutura_{slug}"),
+    # Internet
+    (re.compile(r'Como você avalia a qualidade da internet .*?\?\s*(.+)$', re.IGNORECASE),
+     "Internet", "Internet • {item}", "internet_{slug}"),
+    # Presença em ALUNOS
+    (re.compile(r'O quanto as seguintes características .*? ALUNOS\(AS\).*?\?\s*(.+)$', re.IGNORECASE),
+     "Percepção Alunos", "Alunos • {item}", "alunos_{slug}"),
+    # Presença em PROFESSORES
+    (re.compile(r'O quanto as seguintes características .*? PROFESSORES\(AS\).*?\?\s*(.+)$', re.IGNORECASE),
+     "Percepção Professores", "Professores • {item}", "professores_{slug}"),
+    # Postura empreendedora dos alunos
+    (re.compile(r'como você avalia .*? ALUNOS\(AS\) .*? postura empreendedora', re.IGNORECASE),
+     "Percepção Alunos", "Alunos • Postura empreendedora", "alunos_postura_empreendedora"),
+    # Motivos de permanência
+    (re.compile(r'Quais motivos .*? fazem permanecer', re.IGNORECASE),
+     "Permanência", "Permanência • Motivos", "permanencia_motivos"),
+    # Motivos de evasão de colegas
+    (re.compile(r'Você possui colegas .*? quais foram os motivos', re.IGNORECASE),
+     "Evasão de colegas", "Evasão de colegas • Motivos", "evasao_colegas_motivos"),
+]
+
+def build_column_map(columns: list[str]) -> pd.DataFrame:
+    rows = []
+    for col in columns:
+        original = col
+        q = _clean_question(col)
+        classe = "Outros"
+        rotulo = q
+        nome_tecnico = _slugify(q)[:80]
+        for rx, fam, pub_tpl, tech_tpl in _PATTERNS:
+            m = rx.search(q)
+            if m:
+                item = m.group(1).strip() if m.lastindex else ""
+                # quando houver subitem
+                if "{item}" in pub_tpl:
+                    rotulo = pub_tpl.format(item=item)
+                    nome_tecnico = tech_tpl.format(slug=_slugify(item))[:80]
+                else:
+                    rotulo = pub_tpl
+                    nome_tecnico = tech_tpl
+                classe = fam
+                break
+        # refinamentos de subitens comuns
+        rotulo = rotulo.replace("Velocidade do acesso sem fio (Wi-Fi)", "Velocidade Wi-Fi")
+        rows.append({
+            "coluna_original": original,
+            "classe": classe,
+            "rotulo_publico": rotulo,
+            "nome_tecnico": nome_tecnico
+        })
+    return pd.DataFrame(rows)
+
+# Exemplo de uso dentro do fluxo:
+# mdf = build_column_map(df.columns)
+# st.dataframe(mdf)
+# st.download_button("Baixar columns_classification.csv", mdf.to_csv(index=False).encode("utf-8"), "columns_classification.csv", "text/csv")
+
+
 @st.cache_data(show_spinner=False)
 def read_excel(path_or_file):
     try:
