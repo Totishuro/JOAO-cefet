@@ -1,10 +1,5 @@
-numpy
-numpy>=1.26
-openpyxl
-openpyxl>=3.1
-pandas
+streamlit>=1.36
 pandas>=2.2
-plotly
-plotly>=5.22
-streamlit
-streamlit>=1.37
+numpy>=1.26
+openpyxl>=3.1
+plotly>=5.24
