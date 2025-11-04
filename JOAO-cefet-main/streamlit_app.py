@@ -1,204 +1,176 @@
-
 import streamlit as st
-from column_mapping import apply_column_mapping
 import pandas as pd
 import numpy as np
-from pathlib import Path
 import plotly.express as px
-
-st.set_page_config(page_title="CEFET-MG | Dashboard", layout="wide")
-
-DEFAULT_FILE = "data/dados_cefet.xlsx"
-
+from pathlib import Path
 import re
-import unicodedata
-import pandas as pd
 
-def _slugify(txt: str) -> str:
-    txt = unicodedata.normalize("NFKD", txt)
-    txt = "".join(ch for ch in txt if not unicodedata.combining(ch))
-    txt = re.sub(r"[^a-zA-Z0-9]+", "_", txt).strip("_").lower()
-    return re.sub(r"_+", "_", txt)
+# ===== Config =====
+st.set_page_config(page_title="Painel CEFET-MG", layout="wide")
+DEFAULT_FILE = "data/Dados_CEFET_MG.xlsx"  # opcional: deixe este .xlsx dentro do repo (pasta /data)
 
-def _clean_question(q: str) -> str:
-    # remove instruções e observações repetitivas
-    q = re.sub(r'Caso não saiba avaliar.*$', '', q, flags=re.IGNORECASE).strip()
-    q = re.sub(r'Considerando o respondido na questão anterior,?\s*', '', q, flags=re.IGNORECASE)
-    q = q.replace('"', '').replace("“","").replace("”","")
-    return re.sub(r'\s+', ' ', q).strip()
-
-_PATTERNS = [
-    # Infra PCD
-    (re.compile(r'Como você avalia a qualidade da infraestrutura destinada .*?\?\s*(.+)$', re.IGNORECASE),
-     "Infra PCD", "Acessibilidade • {item}", "acessibilidade_{slug}"),
-    # Infra Geral
-    (re.compile(r'Como você avalia a qualidade da infraestrutura oferecida .*?\?\s*(.+)$', re.IGNORECASE),
-     "Infra Geral", "Infraestrutura • {item}", "infraestrutura_{slug}"),
-    # Internet
-    (re.compile(r'Como você avalia a qualidade da internet .*?\?\s*(.+)$', re.IGNORECASE),
-     "Internet", "Internet • {item}", "internet_{slug}"),
-    # Presença em ALUNOS
-    (re.compile(r'O quanto as seguintes características .*? ALUNOS\(AS\).*?\?\s*(.+)$', re.IGNORECASE),
-     "Percepção Alunos", "Alunos • {item}", "alunos_{slug}"),
-    # Presença em PROFESSORES
-    (re.compile(r'O quanto as seguintes características .*? PROFESSORES\(AS\).*?\?\s*(.+)$', re.IGNORECASE),
-     "Percepção Professores", "Professores • {item}", "professores_{slug}"),
-    # Postura empreendedora dos alunos
-    (re.compile(r'como você avalia .*? ALUNOS\(AS\) .*? postura empreendedora', re.IGNORECASE),
-     "Percepção Alunos", "Alunos • Postura empreendedora", "alunos_postura_empreendedora"),
-    # Motivos de permanência
-    (re.compile(r'Quais motivos .*? fazem permanecer', re.IGNORECASE),
-     "Permanência", "Permanência • Motivos", "permanencia_motivos"),
-    # Motivos de evasão de colegas
-    (re.compile(r'Você possui colegas .*? quais foram os motivos', re.IGNORECASE),
-     "Evasão de colegas", "Evasão de colegas • Motivos", "evasao_colegas_motivos"),
-]
-
-def build_column_map(columns: list[str]) -> pd.DataFrame:
-    rows = []
-    for col in columns:
-        original = col
-        q = _clean_question(col)
-        classe = "Outros"
-        rotulo = q
-        nome_tecnico = _slugify(q)[:80]
-        for rx, fam, pub_tpl, tech_tpl in _PATTERNS:
-            m = rx.search(q)
-            if m:
-                item = m.group(1).strip() if m.lastindex else ""
-                # quando houver subitem
-                if "{item}" in pub_tpl:
-                    rotulo = pub_tpl.format(item=item)
-                    nome_tecnico = tech_tpl.format(slug=_slugify(item))[:80]
-                else:
-                    rotulo = pub_tpl
-                    nome_tecnico = tech_tpl
-                classe = fam
-                break
-        # refinamentos de subitens comuns
-        rotulo = rotulo.replace("Velocidade do acesso sem fio (Wi-Fi)", "Velocidade Wi-Fi")
-        rows.append({
-            "coluna_original": original,
-            "classe": classe,
-            "rotulo_publico": rotulo,
-            "nome_tecnico": nome_tecnico
-        })
-    return pd.DataFrame(rows)
-
-# Exemplo de uso dentro do fluxo:
-# mdf = build_column_map(df.columns)
-# st.dataframe(mdf)
-# st.download_button("Baixar columns_classification.csv", mdf.to_csv(index=False).encode("utf-8"), "columns_classification.csv", "text/csv")
-
-
+# ===== Helpers =====
 @st.cache_data(show_spinner=False)
-def read_excel(path_or_file):
-    try:
-        return pd.read_excel(path_or_file, engine="openpyxl")
-    except Exception:
-        return pd.read_excel(path_or_file)
+def read_excel(path_or_buf):
+    return pd.read_excel(path_or_buf, engine="openpyxl")
 
-def kpi_block(df: pd.DataFrame, id_col="respondent_id", age_col="IDADE"):
-    total_respostas = len(df)
-    total_respondentes = df[id_col].nunique() if id_col in df.columns else np.nan
-    linhas_duplicadas_por_id = total_respostas - total_respondentes if id_col in df.columns else np.nan
-    pct_dup = (linhas_duplicadas_por_id / total_respostas) if total_respostas and not np.isnan(linhas_duplicadas_por_id) else np.nan
+def _slugify(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r'[\r\n]+', ' ', s)
+    s = re.sub(r'["“”’]', '', s)
+    s = re.sub(r'\(.*?\)', '', s)  # remove parenteses longos
+    s = re.sub(r'[^0-9a-zA-ZÁÉÍÓÚÂÊÔÃÕÇáéíóúâêôãõç ]+', '', s)
+    s = s.lower()
+    s = re.sub(r'\s+', ' ', s)
+    s = s.replace(' ', '_')
+    return s[:140]
 
-    idade_media = idade_min = idade_max = np.nan
-    if age_col in df.columns and id_col in df.columns:
-        idade_by_id = (
-            df[[id_col, age_col]]
-            .dropna(subset=[age_col])
-            .drop_duplicates(subset=[id_col], keep="first")
-        )
-        if not idade_by_id.empty:
-            idade_media = idade_by_id[age_col].mean()
-            idade_min = idade_by_id[age_col].min()
-            idade_max = idade_by_id[age_col].max()
+def _smart_label(s: str) -> str:
+    # encurta textos muito longos para rótulos de gráfico
+    s2 = re.sub(r'Caso.*?observado', '', s, flags=re.IGNORECASE)
+    s2 = re.sub(r'O quanto as seguintes características estão presentes nos\(as\) ', '', s2, flags=re.IGNORECASE)
+    s2 = re.sub(r'minha Instituição de Ensino Superior', 'IES', s2, flags=re.IGNORECASE)
+    s2 = s2.replace('ALUNOS(AS)', 'Alunos').replace('PROFESSORES(AS)', 'Professores')
+    s2 = s2.replace('Instituição de Ensino Superior', 'IES')
+    s2 = re.sub(r'\s+', ' ', s2).strip(' ?:"')
+    return s2 if s2 else s
 
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("Total respostas (linhas)", f"{total_respostas:,}".replace(",", "."))
-    c2.metric("Respondentes únicos", f"{int(total_respondentes):,}".replace(",", ".") if not np.isnan(total_respondentes) else "—")
-    c3.metric("Repetições por ID (técnicas)", f"{int(linhas_duplicadas_por_id):,}".replace(",", ".") if not np.isnan(linhas_duplicadas_por_id) else "—",
-              help="Atenção: não são 'duplicadas' verdadeiras; refletem opções múltiplas que viraram linhas.")
-    c4.metric("% repetição por ID", f"{(pct_dup*100):.2f}%" if not np.isnan(pct_dup) else "—")
-    c5.metric("Idade média", f"{idade_media:.1f}" if not np.isnan(idade_media) else "—")
-    c6.metric("Idade (min–máx.)", f"{int(idade_min)}–{int(idade_max)}" if not np.isnan(idade_min) and not np.isnan(idade_max) else "—")
-
-def categorical_explorer(df: pd.DataFrame, id_col="respondent_id"):
-    st.subheader("Explorador de perguntas e opções")
-    categorical_cols = [c for c in df.columns if df[c].dtype == "object" and c != id_col]
-    if not categorical_cols:
-        st.info("Não encontrei colunas categóricas para explorar.")
-        return
-
-    col = st.selectbox("Selecione a coluna (pergunta):", categorical_cols, index=0)
-    top_n = st.slider("Top N", 5, 30, 15)
-
-    linhas = (
-        df.groupby(col, dropna=False)
-        .size()
-        .reset_index(name="linhas")
-        .sort_values("linhas", ascending=False)
-        .head(top_n)
-    )
-
-    if id_col in df.columns:
-        resp = (
-            df.dropna(subset=[col])
-              .groupby(col)[id_col].nunique()
-              .reset_index(name="respondentes_unicos")
-              .sort_values("respondentes_unicos", ascending=False)
-        )
-        base = linhas.merge(resp, on=col, how="left")
+def load_or_build_mapping(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Procura 'columns_classification.csv' na raiz do app.
+    Se não existir, cria automaticamente com alias amigáveis e salva para edição posterior.
+    Colunas esperadas no CSV: column,class,alias,label
+    """
+    csv_path = Path("columns_classification.csv")
+    if csv_path.exists():
+        mp = pd.read_csv(csv_path)
+        for c in ["column", "class", "alias", "label"]:
+            if c not in mp.columns:
+                raise ValueError("columns_classification.csv inválido (faltam colunas).")
     else:
-        base = linhas
-        base["respondentes_unicos"] = np.nan
+        rows = []
+        for col in df.columns:
+            # classe heurística simples
+            lc = col.lower()
+            klass = "meta"
+            if "alunos" in lc: klass = "alunos"
+            if "professores" in lc: klass = "professores"
+            if "infraestrutura" in lc or "internet" in lc: klass = "infraestrutura"
+            if "empreendedor" in lc: klass = "empreendedorismo"
+            if "projeto" in lc: klass = "projetos"
+            if "motivo" in lc: klass = "motivos"
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.write("Linhas por opção (inclui múltipla escolha expandida)")
-        fig1 = px.bar(base, x=col, y="linhas")
-        fig1.update_layout(xaxis_title="", yaxis_title="Linhas")
-        st.plotly_chart(fig1, use_container_width=True)
-    with c2:
-        st.write("Respondentes únicos por opção (presença ≥1x)")
-        fig2 = px.bar(base, x=col, y="respondentes_unicos")
-        fig2.update_layout(xaxis_title="", yaxis_title="Respondentes únicos")
-        st.plotly_chart(fig2, use_container_width=True)
+            rows.append({
+                "column": col,
+                "class": klass,
+                "alias": _slugify(col),
+                "label": _smart_label(col),
+            })
+        mp = pd.DataFrame(rows)
+        mp.to_csv(csv_path, index=False, encoding="utf-8")
+    return mp
 
-    st.dataframe(base, use_container_width=True)
+def apply_column_mapping(df: pd.DataFrame):
+    mp = load_or_build_mapping(df)
+    col_map = {row["column"]: row["alias"] for _, row in mp.iterrows()}
+    labels = {row["alias"]: row["label"] for _, row in mp.iterrows()}
+    classes = {row["alias"]: row["class"] for _, row in mp.iterrows()}
+    df2 = df.rename(columns=col_map)
+    return df2, labels, classes
 
+def kpi_cards(df: pd.DataFrame):
+    cols = st.columns(4)
+    total_respostas = len(df)
+    total_respondentes = df["respondent_id"].nunique() if "respondent_id" in df.columns else np.nan
+
+    # idade
+    idade_col = None
+    for c in df.columns:
+        if c.lower() in ("idade", "idade_anos"):
+            idade_col = c
+            break
+
+    if idade_col is not None:
+        idade = pd.to_numeric(df[idade_col], errors="coerce")
+        media_idade = idade.mean(skipna=True)
+        idade_min = idade.min(skipna=True)
+        idade_max = idade.max(skipna=True)
+    else:
+        media_idade = idade_min = idade_max = np.nan
+
+    with cols[0]:
+        st.metric("Total de respostas", f"{total_respostas:,}".replace(",", "."))
+    with cols[1]:
+        st.metric("Respondentes únicos", f"{int(total_respondentes):,}".replace(",", ".") if pd.notna(total_respondentes) else "—")
+    with cols[2]:
+        st.metric("Idade média", f"{media_idade:.1f}" if pd.notna(media_idade) else "—")
+    with cols[3]:
+        st.metric("Faixa etária", f"{int(idade_min)}–{int(idade_max)}" if pd.notna(idade_min) and pd.notna(idade_max) else "—")
+
+def draw_charts(df: pd.DataFrame, labels: dict):
+    st.subheader("Distribuições principais")
+    left, right = st.columns(2)
+
+    # Exemplo 1: VOCÊ É (perfil)
+    col_genero = None
+    for c in df.columns:
+        if c.lower() in ("voce_é", "voce_e", "genero", "perfil"):
+            col_genero = c
+            break
+    if col_genero:
+        vc = df[col_genero].value_counts(dropna=False).reset_index()
+        vc.columns = ["categoria", "qtd"]
+        with left:
+            st.plotly_chart(
+                px.bar(vc, x="categoria", y="qtd", title=labels.get(col_genero, col_genero)),
+                use_container_width=True,
+            )
+
+    # Exemplo 2: Instituição
+    col_ies = None
+    for c in df.columns:
+        if "instituicao" in c.lower() or "instituição" in c.lower():
+            col_ies = c
+            break
+    if col_ies:
+        vc = df[col_ies].value_counts().head(20).reset_index()
+        vc.columns = ["instituição", "qtd"]
+        with right:
+            st.plotly_chart(
+                px.bar(vc, x="instituição", y="qtd", title=labels.get(col_ies, col_ies)),
+                use_container_width=True,
+            )
+
+# ===== UI =====
 def main():
-    st.title("CEFET-MG • Dashboard de Pesquisa")
-    st.caption("App em Streamlit com KPIs e exploração de múltipla escolha sem remover linhas por ID.")
+    st.title("Painel CEFET-MG — Empreendedorismo e Infraestrutura")
+    st.caption("Upload do Excel e normalização automática dos nomes de colunas (sem deduplicar múltiplas respostas por respondent_id).")
 
     with st.sidebar:
-        st.header("Entrada de dados")
-        uploaded = st.file_uploader("Envie o Excel (.xlsx)", type=["xlsx"])
-        use_default = st.toggle("Usar arquivo padrão do repositório", value=True, help="data/dados_cefet.xlsx")
+        st.header("Fonte de dados")
+        uploaded = st.file_uploader("Carregue um Excel (.xlsx)", type=["xlsx"])
+        use_default = st.toggle("Usar arquivo padrão do repositório", value=True)
 
-        id_col = st.text_input("Nome da coluna de ID", value="respondent_id")
-        age_col = st.text_input("Nome da coluna de idade (opcional)", value="IDADE")
-
-    src = None
     if uploaded is not None:
         df = read_excel(uploaded)
-    df, FRIENDLY_LABELS, CLASSES = apply_column_mapping(df)
-
         src = f"Upload: {uploaded.name}"
     elif use_default and Path(DEFAULT_FILE).exists():
         df = read_excel(DEFAULT_FILE)
         src = f"Arquivo padrão: {DEFAULT_FILE}"
     else:
-        st.warning("Envie um Excel pela barra lateral ou habilite 'Usar arquivo padrão'.")
+        st.info("Carregue um arquivo ou ative 'Usar arquivo padrão'.")
         st.stop()
 
-    st.success(f"Fonte de dados: {src}")
-    st.write(f"Formato: {df.shape[0]:,} linhas × {df.shape[1]:,} colunas".replace(",", "."))
+    # Normalização de colunas assistida por CSV (ou criada automaticamente)
+    df, FRIENDLY_LABELS, CLASSES = apply_column_mapping(df)
 
-    kpi_block(df, id_col=id_col, age_col=age_col)
-    categorical_explorer(df, id_col=id_col)
+    st.caption(f"Origem: {src}")
+    kpi_cards(df)
+
+    with st.expander("Prévia dos dados", expanded=False):
+        st.dataframe(df.head(50), use_container_width=True)
+
+    draw_charts(df, FRIENDLY_LABELS)
 
 if __name__ == "__main__":
     main()
