@@ -7,8 +7,10 @@ import plotly.graph_objects as go
 import requests
 import io
 from datetime import datetime
+import unicodedata
+import re
 
-# ===== Configuração =====
+# ===== Configurações Iniciais =====
 st.set_page_config(
     page_title="Dashboard CEFET-MG",
     page_icon="📊",
@@ -16,28 +18,513 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Definir configurações base dos gráficos
+# Constantes
+LIKERT_ORDER = ["1 Muito ruim", "2 Ruim", "3 Razoável", "4 Boa", "5 Excelente"]
+LIKERT_NEUTROS = {"Não observado", "Nao observado", "Não se aplica", "Nao se aplica"}
+LIKERT_COLORS = {
+    "1 Muito ruim": "#ff4444",
+    "2 Ruim": "#ffaa44",
+    "3 Razoável": "#ffff44",
+    "4 Boa": "#88ff44",
+    "5 Excelente": "#44ff44"
+}
+
+ID_CANDIDATES = [
+    "respondent_id", "respondente_id", "id_respondente",
+    "respondentid", "idrespondente"
+]
+
+# ===== Funções Utilitárias =====
+def normalize_text(s):
+    """Normaliza texto removendo acentos e caracteres especiais"""
+    if not isinstance(s, str):
+        return str(s)
+    s = s.strip().lower()
+    s = ''.join(ch for ch in unicodedata.normalize('NFD', s) 
+                if unicodedata.category(ch) != 'Mn')
+    return re.sub(r'[^a-z0-9]+', '', s)
+
+def find_respondent_id_col(df):
+    """Detecta coluna de ID do respondente"""
+    cols_norm = {normalize_text(c): c for c in df.columns}
+    
+    # Tenta encontrar por nome exato
+    for candidate in ID_CANDIDATES:
+        if normalize_text(candidate) in cols_norm:
+            return cols_norm[normalize_text(candidate)]
+    
+    # Busca heurística
+    for key in ["respondent", "respondente", "id"]:
+        for norm_name, orig_name in cols_norm.items():
+            if key in norm_name and ("respondent" in norm_name or "respondente" in norm_name):
+                return orig_name
+    
+    raise ValueError("Coluna de ID do respondente não detectada")
+
 def get_base_graph_config():
+    """Configurações base para gráficos"""
     return {
-        'plot_bgcolor': 'rgba(0,0,0,0)',  # Fundo transparente
-        'paper_bgcolor': 'rgba(0,0,0,0)',  # Fundo do papel transparente
+        'plot_bgcolor': 'rgba(0,0,0,0)',
+        'paper_bgcolor': 'rgba(0,0,0,0)',
         'font': {
-            'color': 'white',  # Fonte branca
+            'color': 'white',
             'size': 12
         },
         'xaxis': {
             'gridcolor': 'rgba(255,255,255,0.1)',
             'linecolor': 'rgba(255,255,255,0.2)',
-            'tickfont': {'color': 'white'}
+            'tickfont': {'color': 'white'},
+            'automargin': True
         },
         'yaxis': {
             'gridcolor': 'rgba(255,255,255,0.1)',
             'linecolor': 'rgba(255,255,255,0.2)',
-            'tickfont': {'color': 'white'}
+            'tickfont': {'color': 'white'},
+            'automargin': True
         }
     }
 
-# CSS para mobile responsivo e tema
+def break_text(text, width=20):
+    """Quebra texto em múltiplas linhas"""
+    if not isinstance(text, str):
+        return str(text)
+    
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+    
+    for word in words:
+        if current_length + len(word) + 1 <= width:
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+            current_line = [word]
+            current_length = len(word)
+    
+    if current_line:
+        lines.append(' '.join(current_line))
+    
+    return '<br>'.join(lines)
+
+# ===== Funções Likert =====
+@st.cache_data
+def create_likert_matrix(df, questions, id_col):
+    """Cria matriz de respostas Likert"""
+    results = []
+    
+    for display_name, col in questions.items():
+        if col not in df.columns:
+            continue
+        
+        # Conta respondentes únicos por resposta
+        valid_responses = df[~df[col].isin(LIKERT_NEUTROS)].copy()
+        counts = valid_responses.groupby(col)[id_col].nunique().reindex(LIKERT_ORDER).fillna(0)
+        total = valid_responses[id_col].nunique()
+        
+        if total > 0:  # Só inclui se houver respostas válidas
+            percentages = (counts / total * 100).round(1)
+            
+            for likert_value in LIKERT_ORDER:
+                results.append({
+                    'Pergunta': display_name,
+                    'Resposta': likert_value,
+                    'Contagem': counts.get(likert_value, 0),
+                    'Percentual': percentages.get(likert_value, 0),
+                    'Total': total
+                })
+    
+    return pd.DataFrame(results)
+
+def plot_likert_matrix(df_matrix):
+    """Plota heatmap da matriz Likert"""
+    if df_matrix.empty:
+        return None
+        
+    matrix_data = df_matrix.pivot(
+        index='Pergunta',
+        columns='Resposta',
+        values='Percentual'
+    ).reindex(columns=LIKERT_ORDER)
+    
+    fig = go.Figure(data=go.Heatmap(
+        z=matrix_data.values,
+        x=matrix_data.columns,
+        y=matrix_data.index,
+        colorscale=[
+            [0, "#ff4444"],
+            [0.25, "#ffaa44"],
+            [0.5, "#ffff44"],
+            [0.75, "#88ff44"],
+            [1, "#44ff44"]
+        ],
+        text=matrix_data.values,
+        texttemplate="%{text:.1f}%",
+        textfont={"color": "white"},
+        hoverongaps=False
+    ))
+    
+    fig.update_layout(
+        **get_base_graph_config(),
+        height=max(400, len(matrix_data.index) * 40),
+        xaxis_title="Avaliação",
+        yaxis_title="Item Avaliado",
+        margin=dict(l=200, r=20, t=60, b=60)
+    )
+    
+    return fig
+
+def plot_likert_bars(df_matrix, question):
+    """Plota barras 100% empilhadas para uma pergunta"""
+    df_question = df_matrix[df_matrix['Pergunta'] == question].copy()
+    
+    if df_question.empty:
+        return None
+    
+    # Calcula posições para labels
+    cumsum = 0
+    positions = []
+    for pct in df_question['Percentual']:
+        positions.append(cumsum + pct/2)
+        cumsum += pct
+    
+    fig = go.Figure()
+    
+    for i, row in df_question.iterrows():
+        fig.add_trace(go.Bar(
+            name=row['Resposta'],
+            y=[question],
+            x=[row['Percentual']],
+            orientation='h',
+            marker_color=LIKERT_COLORS[row['Resposta']],
+            text=f"{row['Percentual']:.1f}%",
+            textposition='inside',
+            textfont={'color': 'white'},
+            hovertemplate=(
+                f"<b>{row['Resposta']}</b><br>"
+                f"Respondentes: {row['Contagem']}<br>"
+                f"Percentual: {row['Percentual']:.1f}%<br>"
+                f"Total: {row['Total']}"
+            )
+        ))
+    
+    fig.update_layout(
+        **get_base_graph_config(),
+        barmode='stack',
+        showlegend=True,
+        height=150,
+        margin=dict(l=200, r=20, t=20, b=20),
+        xaxis=dict(
+            title="Percentual de Respondentes",
+            range=[0, 100]
+        ),
+        yaxis=dict(
+            title=""
+        )
+    )
+    
+    return fig
+
+# ===== Funções de Análise =====
+def show_kpis(df, id_col):
+    """Mostra KPIs principais"""
+    st.markdown("## 📊 Visão Geral")
+    
+    cols = st.columns(2)
+    
+    with cols[0]:
+        total_respondentes = df[id_col].nunique()
+        st.metric("📝 Total de Respondentes", f"{total_respondentes:,}")
+    
+    with cols[1]:
+        idade_col = next((col for col in ['idade', 'IDADE'] 
+                         if col in df.columns), None)
+        if idade_col:
+            valid_ages = pd.to_numeric(df[idade_col], errors='coerce')
+            media_idade = valid_ages.mean()
+            if not pd.isna(media_idade):
+                st.metric("👤 Idade Média", f"{media_idade:.1f} anos")
+            else:
+                st.metric("👤 Idade Média", "N/A")
+        else:
+            st.metric("👤 Idade Média", "N/A")
+
+def show_profile_analysis(df, id_col):
+    """Análise de perfil dos respondentes"""
+    st.markdown("## 👥 Perfil dos Respondentes")
+    
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.subheader("Distribuição por Perfil")
+        perfil_col = next((col for col in ['voce_e', 'VOCE É'] 
+                          if col in df.columns), None)
+        if perfil_col:
+            counts = df.groupby(perfil_col)[id_col].nunique().reset_index()
+            counts.columns = ['Perfil', 'Respondentes']
+            
+            fig = go.Figure(data=[
+                go.Bar(
+                    x=counts['Perfil'].apply(break_text),
+                    y=counts['Respondentes'],
+                    text=counts['Respondentes'],
+                    textposition='outside',
+                    marker_color='#667eea'
+                )
+            ])
+            
+            fig.update_layout(
+                **get_base_graph_config(),
+                height=400,
+                xaxis_tickangle=-45,
+                margin=dict(l=20, r=20, t=40, b=120)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("⚠️ Coluna de perfil não encontrada")
+    
+    with col2:
+        st.subheader("Distribuição por Idade")
+        idade_col = next((col for col in ['idade', 'IDADE'] 
+                         if col in df.columns), None)
+        if idade_col:
+            df_temp = df.copy()
+            df_temp[idade_col] = pd.to_numeric(df_temp[idade_col], errors='coerce')
+            df_temp['faixa_etaria'] = pd.cut(
+                df_temp[idade_col],
+                bins=[0, 19, 25, 30, 100],
+                labels=['Até 19', '20-25', '26-30', 'Acima de 30']
+            )
+            
+            counts = df_temp.groupby('faixa_etaria')[id_col].nunique().reset_index()
+            counts.columns = ['Faixa', 'Respondentes']
+            
+            fig = go.Figure(data=[
+                go.Bar(
+                    x=counts['Faixa'],
+                    y=counts['Respondentes'],
+                    text=counts['Respondentes'],
+                    textposition='outside',
+                    marker_color='#764ba2'
+                )
+            ])
+            
+            fig.update_layout(
+                **get_base_graph_config(),
+                height=400,
+                margin=dict(l=20, r=20, t=40, b=60)
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("⚠️ Coluna de idade não encontrada")
+
+def show_courses_analysis(df, id_col):
+    """Análise de cursos"""
+    st.markdown("## 🎓 Análise de Cursos")
+    
+    curso_col = next((col for col in ['curso_graduacao', 'CURSO DE GRADUAÇÃO OF', 'curso'] 
+                     if col in df.columns), None)
+    if curso_col:
+        counts = df.groupby(curso_col)[id_col].nunique().reset_index()
+        counts.columns = ['Curso', 'Respondentes']
+        counts = counts.sort_values('Respondentes', ascending=True).tail(15)
+        
+        fig = go.Figure(data=[
+            go.Bar(
+                y=counts['Curso'].apply(break_text),
+                x=counts['Respondentes'],
+                orientation='h',
+                text=counts['Respondentes'],
+                textposition='outside',
+                marker_color='#2ecc71'
+            )
+        ])
+        
+        fig.update_layout(
+            **get_base_graph_config(),
+            height=max(400, len(counts) * 30),
+            margin=dict(l=200, r=20, t=40, b=60)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        with st.expander("Ver todos os cursos"):
+            all_courses = df.groupby(curso_col)[id_col].nunique().reset_index()
+            all_courses.columns = ['Curso', 'Respondentes']
+            all_courses['%'] = (all_courses['Respondentes'] / 
+                              df[id_col].nunique() * 100).round(2)
+            st.dataframe(
+                all_courses.sort_values('Respondentes', ascending=False),
+                use_container_width=True
+            )
+    else:
+        st.warning("⚠️ Coluna de curso não encontrada")
+
+def show_entrepreneurship_analysis(df, id_col):
+    """Análise de empreendedorismo"""
+    st.markdown("## 🚀 Empreendedorismo")
+    
+    # Conceitos de Empreendedorismo (Likert)
+    concept_questions = {
+        'Negócio Próprio': 'emp_negocio',
+        'Impacto Social': 'emp_social',
+        'Inovação': 'emp_inovacao',
+        'Sustentabilidade': 'emp_sustent'
+    }
+    
+    matrix_data = create_likert_matrix(df, concept_questions, id_col)
+    if not matrix_data.empty:
+        st.subheader("Conceitos de Empreendedorismo")
+        fig_matrix = plot_likert_matrix(matrix_data)
+        if fig_matrix:
+            st.plotly_chart(fig_matrix, use_container_width=True)
+            
+            st.markdown("### Detalhamento por Conceito")
+            for question in concept_questions.keys():
+                fig_bars = plot_likert_bars(matrix_data, question)
+                if fig_bars:
+                    st.plotly_chart(fig_bars, use_container_width=True)
+    
+    # Fundadores/Sócios
+    st.subheader("Fundadores/Sócios")
+    fundador_col = next((col for col in [
+        'socio_ou_fundador',
+        'Você é sócio(a) ou fundador(a) de alguma empresa?Response'
+    ] if col in df.columns), None)
+    
+    if fundador_col:
+        counts = df.groupby(fundador_col)[id_col].nunique().reset_index()
+        counts.columns = ['Resposta', 'Respondentes']
+        
+        fig = go.Figure(data=[
+            go.Bar(
+                y=counts['Resposta'].apply(break_text),
+                x=counts['Respondentes'],
+                orientation='h',
+                text=counts['Respondentes'],
+                textposition='outside',
+                marker_color='#3498db'
+            )
+        ])
+        
+        fig.update_layout(
+            **get_base_graph_config(),
+            height=200,
+            margin=dict(l=200, r=20, t=20, b=20)
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        total_resp = df[id_col].nunique()
+        total_fund = df[df[fundador_col] == 'Sim'][id_col].nunique()
+        pct = (total_fund / total_resp * 100)
+        st.metric("Percentual de Fundadores", f"{pct:.1f}%")
+    else:
+        st.warning("⚠️ Dados sobre fundadores não encontrados")
+
+def show_professors_analysis(df, id_col):
+    """Análise dos professores"""
+    st.markdown("## 👨‍🏫 Avaliação dos Professores")
+    
+    professor_questions = {
+        'Inconformismo': 'prof_inconformismo',
+        'Visão para Oportunidades': 'prof_visao',
+        'Pensamento Inovador': 'prof_inovacao',
+        'Coragem para Riscos': 'prof_coragem',
+        'Curiosidade': 'prof_curiosidade',
+        'Comunicação': 'prof_comunicacao',
+        'Planejamento': 'prof_planejamento',
+        'Apoio a Iniciativas': 'prof_apoio'
+    }
+    
+    matrix_data = create_likert_matrix(df, professor_questions, id_col)
+    if not matrix_data.empty:
+        fig_matrix = plot_likert_matrix(matrix_data)
+        if fig_matrix:
+            st.plotly_chart(fig_matrix, use_container_width=True)
+            
+            st.markdown("### Detalhamento por Característica")
+            for question in professor_questions.keys():
+                fig_bars = plot_likert_bars(matrix_data, question)
+                if fig_bars:
+                    st.plotly_chart(fig_bars, use_container_width=True)
+    else:
+        st.warning("⚠️ Dados de avaliação dos professores não encontrados")
+
+def show_infrastructure_analysis(df, id_col):
+    """Análise de infraestrutura"""
+    st.markdown("## 🏢 Infraestrutura")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Infraestrutura Geral")
+        infra_questions = {
+            'Biblioteca': 'infra_biblioteca',
+            'Labs. Informática': 'infra_labs_info',
+            'Labs. Pesquisa': 'infra_labs_pesq',
+            'Espaços Convivência': 'infra_espacos',
+            'Restaurante': 'infra_restaurante'
+        }
+        
+        matrix_data = create_likert_matrix(df, infra_questions, id_col)
+        if not matrix_data.empty:
+            fig = plot_likert_matrix(matrix_data)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("⚠️ Dados de infraestrutura não encontrados")
+    
+    with col2:
+        st.subheader("Acessibilidade (PCD)")
+        access_questions = {
+            'Calçadas': 'access_calcadas',
+            'Vias de Acesso': 'access_vias',
+            'Rotas Internas': 'access_rotas',
+            'Sanitários': 'access_sanitarios',
+            'Elevadores/Rampas': 'access_elevadores'
+        }
+        
+        matrix_data = create_likert_matrix(df, access_questions, id_col)
+        if not matrix_data.empty:
+            fig = plot_likert_matrix(matrix_data)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("⚠️ Dados de acessibilidade não encontrados")
+
+# ===== Funções de Carregamento =====
+@st.cache_data
+def load_excel_from_github(url):
+    """Carrega arquivo Excel diretamente do GitHub via URL raw"""
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        in_memory_file = io.BytesIO(response.content)
+        df = pd.read_excel(in_memory_file, engine='openpyxl')
+        return df
+    except Exception as e:
+        st.error(f"❌ Erro ao baixar arquivo do GitHub: {str(e)}")
+        return None
+
+@st.cache_data
+def process_data(df):
+    """Processa dados mantendo contagem de respondentes únicos"""
+    if df is None:
+        return None, None
+    
+    try:
+        id_col = find_respondent_id_col(df)
+        return df, id_col
+    except ValueError as e:
+        st.error(str(e))
+        return None, None
+
+# ===== CSS e Estilo =====
 st.markdown("""
 <style>
     .main-header {
@@ -56,8 +543,7 @@ st.markdown("""
     .stButton>button {
         width: 100%;
     }
-
-    /* Tema escuro para melhor contraste */
+    
     .reportview-container {
         background: #0e1117;
     }
@@ -65,413 +551,32 @@ st.markdown("""
     .sidebar .sidebar-content {
         background: #262730;
     }
+    
+    /* Melhorias de acessibilidade */
+    .tooltip {
+        font-size: 1rem;
+        color: white;
+    }
+    
+    /* Ajustes de contraste */
+    .st-bw {
+        color: white !important;
+    }
+    
+    /* Espaçamento vertical */
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ===== Funções Utilitárias =====
-def break_text(text, width=20):
-    """Quebra texto em múltiplas linhas"""
-    if not isinstance(text, str):
-        return str(text)
-    
-    words = text.split()
-    lines = []
-    current_line = []
-    current_length = 0
-    
-    for word in words:
-        if current_length + len(word) + 1 <= width:
-            current_line.append(word)
-            current_length += len(word) + 1
-        else:
-            lines.append(' '.join(current_line))
-            current_line = [word]
-            current_length = len(word)
-    
-    if current_line:
-        lines.append(' '.join(current_line))
-    
-    return '<br>'.join(lines)
-
-def debug_column_search(df, section_name, patterns):
-    """Função auxiliar para debug de colunas não encontradas"""
-    st.error(f"⚠️ Dados não encontrados para: {section_name}")
-    
-    matching_cols = []
-    for col in df.columns:
-        for pattern in patterns:
-            if pattern.lower() in col.lower():
-                matching_cols.append({
-                    'coluna': col,
-                    'valores_unicos': df[col].unique().tolist()[:5],
-                    'nulos': df[col].isnull().sum()
-                })
-    
-    if matching_cols:
-        st.write("Colunas encontradas:")
-        for col_info in matching_cols:
-            st.write(f"- {col_info['coluna']}")
-            st.write(f"  Primeiros valores: {col_info['valores_unicos']}")
-            st.write(f"  Valores nulos: {col_info['nulos']}")
-    else:
-        st.write("Nenhuma coluna encontrada com os padrões buscados")
-
-# ===== Funções de Carregamento =====
-def load_excel_from_github(url):
-    """Carrega arquivo Excel diretamente do GitHub via URL raw"""
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        in_memory_file = io.BytesIO(response.content)
-        df = pd.read_excel(in_memory_file, engine='openpyxl')
-        return df
-    except Exception as e:
-        st.error(f"❌ Erro ao baixar arquivo do GitHub: {str(e)}")
-        return None
-
-def load_column_mapping():
-    """Carrega o mapeamento de colunas do CSV"""
-    csv_path = Path("columns_classification.csv")
-    
-    if csv_path.exists():
-        try:
-            mapping_df = pd.read_csv(csv_path)
-            col_to_tech = dict(zip(mapping_df['coluna_original'], mapping_df['nome_tecnico']))
-            tech_to_label = dict(zip(mapping_df['nome_tecnico'], mapping_df['rotulo_publico']))
-            tech_to_class = dict(zip(mapping_df['nome_tecnico'], mapping_df['classe']))
-            return col_to_tech, tech_to_label, tech_to_class
-        except Exception as e:
-            st.error(f"Erro ao carregar mapeamento: {str(e)}")
-            return {}, {}, {}
-    else:
-        st.warning("⚠️ Arquivo columns_classification.csv não encontrado.")
-        return {}, {}, {}
-
-def apply_mapping(df, col_to_tech):
-    """Aplica o mapeamento de colunas ao DataFrame"""
-    if not col_to_tech:
-        return df
-    
-    cols_to_rename = {orig: tech for orig, tech in col_to_tech.items() if orig in df.columns}
-    df_renamed = df.rename(columns=cols_to_rename)
-    
-    mapped_count = len(cols_to_rename)
-    st.sidebar.success(f"✅ {mapped_count} colunas mapeadas")
-    
-    return df_renamed
-
-# ===== Funções de Visualização =====
-def create_horizontal_bar_chart(df, categoria_col, valor_col, title, color='#3498db'):
-    """Cria gráfico de barras horizontal com quebra de linha nos rótulos"""
-    df = df.copy()
-    df[categoria_col] = df[categoria_col].apply(break_text)
-    
-    fig = go.Figure(data=[
-        go.Bar(
-            y=df[categoria_col],
-            x=df[valor_col],
-            orientation='h',
-            marker_color=color,
-            text=df[valor_col],
-            textposition='outside',
-            textfont={'color': 'white'}
-        )
-    ])
-    
-    fig.update_layout(
-        **get_base_graph_config(),
-        title=title,
-        height=max(300, len(df) * 30),
-        margin=dict(l=20, r=20, t=40, b=20),
-        showlegend=False
-    )
-    
-    return fig
-
-def create_vertical_bar_chart(df, categoria_col, valor_col, title, color='#3498db'):
-    """Cria gráfico de barras vertical com quebra de linha nos rótulos"""
-    df = df.copy()
-    df[categoria_col] = df[categoria_col].apply(break_text)
-    
-    fig = go.Figure(data=[
-        go.Bar(
-            x=df[categoria_col],
-            y=df[valor_col],
-            marker_color=color,
-            text=df[valor_col],
-            textposition='outside',
-            textfont={'color': 'white'}
-        )
-    ])
-    
-    fig.update_layout(
-        **get_base_graph_config(),
-        title=title,
-        height=400,
-        margin=dict(l=20, r=20, t=40, b=100),
-        showlegend=False,
-        xaxis_tickangle=-45
-    )
-    
-    return fig
-
-# ===== Funções de Análise =====
-def show_kpis(df):
-    """Mostra KPIs principais"""
-    st.markdown("## 📊 Visão Geral")
-    
-    cols = st.columns(2)
-    
-    with cols[0]:
-        total_respondentes = df['respondent_id'].nunique()
-        st.metric("📝 Total de Respondentes", f"{total_respondentes:,}")
-    
-    with cols[1]:
-        idade_col = next((col for col in ['idade', 'IDADE'] if col in df.columns), None)
-        if idade_col:
-            media_idade = pd.to_numeric(df[idade_col], errors='coerce').mean()
-            st.metric("👤 Idade Média", f"{media_idade:.1f} anos")
-        else:
-            st.metric("👤 Idade Média", "N/A")
-
-def show_profile_analysis(df):
-    """Análise de perfil dos respondentes"""
-    st.markdown("## 👥 Perfil dos Respondentes")
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("Distribuição por Perfil")
-        voce_col = next((col for col in ['voce_e', 'VOCE É'] if col in df.columns), None)
-        if voce_col:
-            counts = df.groupby(voce_col)['respondent_id'].nunique().reset_index()
-            counts.columns = ['Perfil', 'Contagem']
-            fig = create_vertical_bar_chart(counts, 'Perfil', 'Contagem', "", '#667eea')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            debug_column_search(df, "Perfil", ['voce_e', 'VOCE É'])
-    
-    with col2:
-        st.subheader("Distribuição por Idade")
-        idade_col = next((col for col in ['idade', 'IDADE'] if col in df.columns), None)
-        if idade_col:
-            df_temp = df.copy()
-            df_temp[idade_col] = pd.to_numeric(df_temp[idade_col], errors='coerce')
-            df_temp['faixa_etaria'] = pd.cut(
-                df_temp[idade_col],
-                bins=[0, 19, 25, 30, 100],
-                labels=['Até 19', '20-25', '26-30', 'Acima de 30']
-            )
-            counts = df_temp.groupby('faixa_etaria')['respondent_id'].nunique().reset_index()
-            counts.columns = ['Faixa', 'Contagem']
-            fig = create_vertical_bar_chart(counts, 'Faixa', 'Contagem', "", '#764ba2')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            debug_column_search(df, "Idade", ['idade', 'IDADE'])
-
-def show_courses_analysis(df):
-    """Análise de cursos"""
-    st.markdown("## 🎓 Análise de Cursos")
-    
-    curso_col = next((col for col in ['curso_graduacao', 'CURSO DE GRADUAÇÃO OF', 'curso'] 
-                     if col in df.columns), None)
-    if curso_col:
-        counts = df.groupby(curso_col)['respondent_id'].nunique().reset_index()
-        counts.columns = ['Curso', 'Contagem']
-        counts = counts.sort_values('Contagem', ascending=True).tail(15)
-        
-        fig = create_horizontal_bar_chart(counts, 'Curso', 'Contagem', "Top 15 Cursos", '#2ecc71')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        with st.expander("Ver todos os cursos"):
-            all_courses = df.groupby(curso_col)['respondent_id'].nunique().reset_index()
-            all_courses.columns = ['Curso', 'Respondentes Únicos']
-            all_courses['%'] = (all_courses['Respondentes Únicos'] / 
-                              df['respondent_id'].nunique() * 100).round(2)
-            st.dataframe(all_courses.sort_values('Respondentes Únicos', ascending=False),
-                        use_container_width=True)
-    else:
-        debug_column_search(df, "Cursos", ['curso', 'graduacao'])
-
-def show_entrepreneurship_analysis(df):
-    """Análise de empreendedorismo"""
-    st.markdown("## 🚀 Empreendedorismo")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Conceitos de Empreendedorismo")
-        
-        conceito_patterns = [
-            ('Negócio', ['negócio', 'empresa', 'empreender']),
-            ('Social', ['social', 'sociedade', 'comunidade']),
-            ('Inovação', ['inovação', 'inovar', 'criar']),
-            ('Ambiente', ['ambiente', 'meio', 'sustentável'])
-        ]
-        
-        conceito_data = {}
-        for label, patterns in conceito_patterns:
-            for col in df.columns:
-                if 'empreend' in col.lower() and any(p in col.lower() for p in patterns):
-                    count = df[df[col] == 1]['respondent_id'].nunique()
-                    if count > 0:
-                        conceito_data[label] = count
-                    break
-        
-        if conceito_data:
-            df_conceitos = pd.DataFrame(list(conceito_data.items()), 
-                                      columns=['Conceito', 'Contagem'])
-            fig = create_vertical_bar_chart(df_conceitos, 'Conceito', 'Contagem', 
-                                          "", '#e74c3c')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            debug_column_search(df, "Conceitos de Empreendedorismo", ['empreend'])
-    
-    with col2:
-        st.subheader("Fundadores/Sócios")
-        fundador_col = next((col for col in [
-            'socio_ou_fundador',
-            'Você é sócio(a) ou fundador(a) de alguma empresa?Response'
-        ] if col in df.columns), None)
-        
-        if fundador_col:
-            counts = df.groupby(fundador_col)['respondent_id'].nunique().reset_index()
-            counts.columns = ['Resposta', 'Contagem']
-            
-            fig = create_horizontal_bar_chart(counts, 'Resposta', 'Contagem', 
-                                            "", '#3498db')
-            st.plotly_chart(fig, use_container_width=True)
-            
-            total_resp = df['respondent_id'].nunique()
-            total_fund = df[df[fundador_col] == 'Sim']['respondent_id'].nunique()
-            pct = (total_fund / total_resp * 100)
-            st.metric("Percentual de Fundadores", f"{pct:.1f}%")
-        else:
-            debug_column_search(df, "Fundadores", ['socio', 'fundador'])
-
-def show_professors_analysis(df):
-    """Análise dos professores"""
-    st.markdown("## 👨‍🏫 Avaliação dos Professores")
-    
-    prof_patterns = {
-        'Inconformismo': ['inconformismo', 'transformá-la'],
-        'Visão': ['visão para oportunidades'],
-        'Inovação': ['pensamento inovador', 'criativo'],
-        'Coragem': ['coragem para tomar riscos'],
-        'Curiosidade': ['curiosidade'],
-        'Comunicação': ['comunicação', 'sociabilidade'],
-        'Planejamento': ['planejamento de atividades'],
-        'Apoio': ['apoio a iniciativas']
-    }
-    
-    prof_data = {}
-    for label, keywords in prof_patterns.items():
-        for col in df.columns:
-            if 'PROFESSOR' in col.upper() and any(kw.lower() in col.lower() for kw in keywords):
-                valores = pd.to_numeric(df[col], errors='coerce')
-                media = valores.mean()
-                if not pd.isna(media) and media > 0:
-                    prof_data[label] = media
-                break
-    
-    if prof_data:
-        df_prof = pd.DataFrame(list(prof_data.items()), columns=['Característica', 'Média'])
-        fig = create_horizontal_bar_chart(df_prof, 'Característica', 'Média', 
-                                        "", '#9b59b6')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        media_geral = np.mean(list(prof_data.values()))
-        st.metric("Média Geral", f"{media_geral:.2f}")
-    else:
-        debug_column_search(df, "Professores", ['PROFESSOR', 'DOCENTE'])
-
-def show_infrastructure_analysis(df):
-    """Análise de infraestrutura"""
-    st.markdown("## 🏢 Infraestrutura")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Infraestrutura Geral")
-        
-        infra_keywords = {
-            'Biblioteca': ['biblioteca'],
-            'Labs Informática': ['laboratórios de informática', 'labs informática'],
-            'Labs Pesquisa': ['laboratórios de pesquisa', 'experimentação'],
-            'Espaços': ['espaços', 'convivência'],
-            'Restaurante': ['restaurante']
-        }
-        
-        infra_data = {}
-        for label, keywords in infra_keywords.items():
-            for col in df.columns:
-                if any(kw.lower() in col.lower() for kw in keywords):
-                    valores = pd.to_numeric(df[col], errors='coerce')
-                    media = valores.mean()
-                    if not pd.isna(media) and media > 0:
-                        infra_data[label] = media
-                    break
-        
-        if infra_data:
-            df_infra = pd.DataFrame(list(infra_data.items()), 
-                                  columns=['Local', 'Avaliação'])
-            fig = create_horizontal_bar_chart(df_infra, 'Local', 'Avaliação', 
-                                            "", '#16a085')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            debug_column_search(df, "Infraestrutura", ['infraestrutura', 'biblioteca'])
-    
-    with col2:
-        st.subheader("Acessibilidade (PCD)")
-        
-        acess_keywords = {
-            'Calçadas': ['calçadas'],
-            'Vias Acesso': ['vias de acesso', 'edificações'],
-            'Rotas': ['rota acessível'],
-            'Sanitários': ['sanitários'],
-            'Elevadores': ['elevadores', 'rampas']
-        }
-        
-        acess_data = {}
-        for label, keywords in acess_keywords.items():
-            for col in df.columns:
-                if any(kw.lower() in col.lower() for kw in keywords):
-                    valores = pd.to_numeric(df[col], errors='coerce')
-                    media = valores.mean()
-                    if not pd.isna(media) and media > 0:
-                        acess_data[label] = media
-                    break
-        
-        if acess_data:
-            df_acess = pd.DataFrame(list(acess_data.items()), 
-                                  columns=['Item', 'Avaliação'])
-            fig = create_horizontal_bar_chart(df_acess, 'Item', 'Avaliação', 
-                                            "", '#27ae60')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            debug_column_search(df, "Acessibilidade", ['acessibilidade', 'pcd'])
-
-def process_data(df):
-    """Processa dados mantendo contagem de respondentes únicos"""
-    if df is None:
-        return None
-        
-    if 'respondent_id' not in df.columns:
-        st.error("❌ Coluna 'respondent_id' não encontrada!")
-        st.info(f"Colunas disponíveis: {', '.join(df.columns[:10])}...")
-        return None
-    
-    return df
-
-# ===== MAIN =====
+# ===== Main =====
 def main():
     # Header
     st.markdown('<h1 class="main-header">📊 Dashboard CEFET-MG</h1>', unsafe_allow_html=True)
     st.markdown("### Pesquisa sobre Empreendedorismo e Educação Superior")
     st.markdown("---")
-    
-    # Carregar mapeamento
-    col_to_tech, tech_to_label, tech_to_class = load_column_mapping()
     
     # Sidebar
     with st.sidebar:
@@ -505,8 +610,8 @@ def main():
         st.info("Dashboard MVP v1.0 - CEFET/MG")
         
         # Data e hora atual
-        now = datetime.utcnow()
-        st.markdown(f"**Última atualização:** {now.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        st.markdown(f"**Última atualização:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+        st.markdown(f"**Usuário:** {st.session_state.get('github_user', 'Visitante')}")
     
     # Processar dados
     df = None
@@ -525,57 +630,51 @@ def main():
     if df is not None:
         st.success(source_info)
         
-        with st.spinner('🔄 Aplicando mapeamento de colunas...'):
-            df = apply_mapping(df, col_to_tech)
-        
         with st.spinner('⚙️ Processando dados...'):
-            df_processed = process_data(df)
+            df_processed, id_col = process_data(df)
         
-        if df_processed is None:
-            st.stop()
-        
-        st.success(f"✅ {df_processed['respondent_id'].nunique():,} respondentes únicos carregados!")
-        
-        tabs = st.tabs([
-            "📊 Geral",
-            "👥 Perfil",
-            "🎓 Cursos",
-            "🚀 Empreendedorismo",
-            "👨‍🏫 Professores",
-            "🏢 Infraestrutura"
-        ])
-        
-        with tabs[0]:
-            show_kpis(df_processed)
-            with st.expander("🔍 Ver dados brutos (100 primeiras linhas)"):
-                st.dataframe(df_processed.head(100), use_container_width=True)
-        
-        with tabs[1]:
-            show_profile_analysis(df_processed)
-        
-        with tabs[2]:
-            show_courses_analysis(df_processed)
-        
-        with tabs[3]:
-            show_entrepreneurship_analysis(df_processed)
-        
-        with tabs[4]:
-            show_professors_analysis(df_processed)
-        
-        with tabs[5]:
-            show_infrastructure_analysis(df_processed)
-        
-        st.markdown("---")
-        st.markdown("### 💾 Download")
-        csv = df_processed.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Baixar dados processados (CSV)",
-            csv,
-            "dados_cefet_processados.csv",
-            "text/csv",
-            use_container_width=True
-        )
-    
+        if df_processed is not None and id_col is not None:
+            st.success(f"✅ {df_processed[id_col].nunique():,} respondentes únicos carregados!")
+            
+            tabs = st.tabs([
+                "📊 Geral",
+                "👥 Perfil",
+                "🎓 Cursos",
+                "🚀 Empreendedorismo",
+                "👨‍🏫 Professores",
+                "🏢 Infraestrutura"
+            ])
+            
+            with tabs[0]:
+                show_kpis(df_processed, id_col)
+                with st.expander("🔍 Ver dados brutos (100 primeiras linhas)"):
+                    st.dataframe(df_processed.head(100), use_container_width=True)
+            
+            with tabs[1]:
+                show_profile_analysis(df_processed, id_col)
+            
+            with tabs[2]:
+                show_courses_analysis(df_processed, id_col)
+            
+            with tabs[3]:
+                show_entrepreneurship_analysis(df_processed, id_col)
+            
+            with tabs[4]:
+                show_professors_analysis(df_processed, id_col)
+            
+            with tabs[5]:
+                show_infrastructure_analysis(df_processed, id_col)
+            
+            st.markdown("---")
+            st.markdown("### 💾 Download")
+            csv = df_processed.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Baixar dados processados (CSV)",
+                csv,
+                "dados_cefet_processados.csv",
+                "text/csv",
+                use_container_width=True
+            )
     else:
         st.info("👆 Configure a fonte de dados no menu lateral")
         
