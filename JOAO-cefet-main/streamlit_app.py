@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import re
+import plotly.express as px
+import plotly.graph_objects as go
 
 # ===== Configuração =====
 st.set_page_config(
@@ -22,30 +23,9 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        color: white;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    
-    .section-header {
-        font-size: 1.3rem;
-        color: #2c3e50;
-        margin-top: 1.5rem;
-        margin-bottom: 1rem;
-        border-bottom: 2px solid #1f77b4;
-        padding-bottom: 0.5rem;
-    }
-    
     @media (min-width: 768px) {
         .main-header {
             font-size: 2.5rem;
-        }
-        .section-header {
-            font-size: 1.8rem;
         }
     }
     
@@ -63,11 +43,9 @@ def load_column_mapping():
     if csv_path.exists():
         try:
             mapping_df = pd.read_csv(csv_path)
-            
             col_to_tech = dict(zip(mapping_df['coluna_original'], mapping_df['nome_tecnico']))
             tech_to_label = dict(zip(mapping_df['nome_tecnico'], mapping_df['rotulo_publico']))
             tech_to_class = dict(zip(mapping_df['nome_tecnico'], mapping_df['classe']))
-            
             return col_to_tech, tech_to_label, tech_to_class
         except Exception as e:
             st.error(f"Erro ao carregar mapeamento: {str(e)}")
@@ -82,7 +60,13 @@ def apply_mapping(df, col_to_tech):
         return df
     
     cols_to_rename = {orig: tech for orig, tech in col_to_tech.items() if orig in df.columns}
-    return df.rename(columns=cols_to_rename)
+    df_renamed = df.rename(columns=cols_to_rename)
+    
+    # Debug: mostrar quais colunas foram mapeadas
+    mapped_count = len(cols_to_rename)
+    st.sidebar.success(f"✅ {mapped_count} colunas mapeadas")
+    
+    return df_renamed
 
 # ===== Funções de Processamento =====
 @st.cache_data(show_spinner=False)
@@ -96,117 +80,141 @@ def load_excel(file_or_path):
         return None
 
 def process_data(df):
-    """Remove duplicatas e retorna estatísticas"""
+    """Processa dados SEM remover duplicatas (respostas múltiplas são válidas)"""
     if df is None:
         return None, None
         
     if 'respondent_id' not in df.columns:
         st.error("❌ Coluna 'respondent_id' não encontrada!")
-        st.info(f"Colunas disponíveis: {', '.join(df.columns[:5])}...")
+        st.info(f"Colunas disponíveis: {', '.join(df.columns[:10])}...")
         return None, None
     
-    df_unique = df.drop_duplicates(subset=['respondent_id'], keep='first')
+    # IMPORTANTE: NÃO remover duplicatas - são respostas múltiplas válidas!
+    total_respostas = len(df)
+    total_respondentes_unicos = df['respondent_id'].nunique()
     
     stats = {
-        'total_linhas': len(df),
-        'total_unicos': len(df_unique),
-        'duplicadas': len(df) - len(df_unique)
+        'total_linhas': total_respostas,
+        'total_unicos': total_respondentes_unicos,
+        'respostas_multiplas': total_respostas - total_respondentes_unicos
     }
     
-    return df_unique, stats
+    return df, stats  # Retorna o DataFrame COMPLETO
+
+# ===== Funções de Plotagem =====
+def create_bar_chart(data_dict, title, color='#1f77b4'):
+    """Cria gráfico de barras com Plotly"""
+    if not data_dict:
+        return None
+    
+    df_plot = pd.DataFrame(list(data_dict.items()), columns=['Categoria', 'Valor'])
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            x=df_plot['Categoria'],
+            y=df_plot['Valor'],
+            marker_color=color,
+            text=df_plot['Valor'],
+            textposition='outside'
+        )
+    ])
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title="",
+        yaxis_title="Quantidade",
+        xaxis_tickangle=-45,
+        height=400,
+        yaxis=dict(rangemode='tozero'),  # Não mostrar valores negativos
+        margin=dict(b=100)  # Margem inferior para rótulos inclinados
+    )
+    
+    return fig
 
 # ===== Visualizações =====
 def show_kpis(df, stats, tech_to_label):
     """Mostra KPIs principais"""
-    st.markdown('<h2 class="section-header">📊 Visão Geral</h2>', unsafe_allow_html=True)
+    st.markdown("## 📊 Visão Geral")
     
     cols = st.columns(4)
     
     with cols[0]:
-        st.metric("📝 Total Respondentes", f"{stats['total_unicos']:,}")
+        st.metric("📝 Total de Respostas", f"{stats['total_linhas']:,}")
     
     with cols[1]:
-        idade_col = 'idade' if 'idade' in df.columns else None
-        if idade_col and idade_col in df.columns:
-            media_idade = df[idade_col].mean()
+        st.metric("👤 Respondentes Únicos", f"{stats['total_unicos']:,}")
+    
+    with cols[2]:
+        if 'respostas_multiplas' in stats and stats['respostas_multiplas'] > 0:
+            st.metric("📋 Respostas Múltiplas", f"{stats['respostas_multiplas']:,}")
+        else:
+            st.metric("📋 Respostas Múltiplas", "0")
+    
+    with cols[3]:
+        idade_col = 'idade' if 'idade' in df.columns else 'IDADE'
+        if idade_col in df.columns:
+            media_idade = pd.to_numeric(df[idade_col], errors='coerce').mean()
             st.metric("👤 Idade Média", f"{media_idade:.1f} anos")
         else:
             st.metric("👤 Idade Média", "N/A")
-    
-    with cols[2]:
-        voce_col = 'voce_e' if 'voce_e' in df.columns else None
-        if voce_col:
-            total_alunos = df[voce_col].str.contains('ALUNO', case=False, na=False).sum()
-            pct = (total_alunos / stats['total_unicos'] * 100)
-            st.metric("🎓 Alunos Atuais", f"{pct:.1f}%")
-        else:
-            st.metric("🎓 Alunos Atuais", "N/A")
-    
-    with cols[3]:
-        fundador_col = 'socio_ou_fundador' if 'socio_ou_fundador' in df.columns else None
-        if fundador_col:
-            total_fundadores = (df[fundador_col] == 'Sim').sum()
-            pct = (total_fundadores / stats['total_unicos'] * 100)
-            st.metric("🚀 Fundadores", f"{pct:.1f}%")
-        else:
-            st.metric("🚀 Fundadores", "N/A")
 
 def show_profile_analysis(df, tech_to_label):
     """Análise de perfil dos respondentes"""
-    st.markdown('<h2 class="section-header">👥 Perfil dos Respondentes</h2>', unsafe_allow_html=True)
+    st.markdown("## 👥 Perfil dos Respondentes")
     
     col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("Distribuição por Perfil")
-        voce_col = 'voce_e' if 'voce_e' in df.columns else None
-        if voce_col:
+        voce_col = 'voce_e' if 'voce_e' in df.columns else 'VOCE É'
+        if voce_col in df.columns:
             perfil_counts = df[voce_col].value_counts()
-            st.bar_chart(perfil_counts)
-            
-            with st.expander("Ver detalhes"):
-                perfil_df = perfil_counts.reset_index()
-                perfil_df.columns = ['Perfil', 'Quantidade']
-                perfil_df['%'] = (perfil_df['Quantidade'] / perfil_df['Quantidade'].sum() * 100).round(2)
-                st.dataframe(perfil_df, use_container_width=True)
+            fig = create_bar_chart(perfil_counts.to_dict(), "Perfil dos Respondentes", '#667eea')
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Coluna de perfil não encontrada")
+            st.info(f"Coluna de perfil não encontrada. Procurado: {voce_col}")
     
     with col2:
         st.subheader("Distribuição por Idade")
-        idade_col = 'idade' if 'idade' in df.columns else None
-        if idade_col:
+        idade_col = 'idade' if 'idade' in df.columns else 'IDADE'
+        if idade_col in df.columns:
             df_temp = df.copy()
+            df_temp[idade_col] = pd.to_numeric(df_temp[idade_col], errors='coerce')
             df_temp['faixa_etaria'] = pd.cut(
                 df_temp[idade_col],
                 bins=[0, 19, 25, 30, 100],
                 labels=['Até 19', '20-25', '26-30', 'Acima de 30']
             )
             faixa_counts = df_temp['faixa_etaria'].value_counts().sort_index()
-            st.bar_chart(faixa_counts)
-            
-            col_a, col_b = st.columns(2)
-            with col_a:
-                st.metric("Mínima", f"{df[idade_col].min():.0f}")
-            with col_b:
-                st.metric("Máxima", f"{df[idade_col].max():.0f}")
+            fig = create_bar_chart(faixa_counts.to_dict(), "Faixa Etária", '#764ba2')
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Coluna de idade não encontrada")
+            st.info(f"Coluna de idade não encontrada. Procurado: {idade_col}")
 
 def show_courses_analysis(df, tech_to_label):
     """Análise de cursos"""
-    st.markdown('<h2 class="section-header">🎓 Análise de Cursos</h2>', unsafe_allow_html=True)
+    st.markdown("## 🎓 Análise de Cursos")
     
-    curso_col = 'curso_graduacao' if 'curso_graduacao' in df.columns else None
+    # Tentar encontrar coluna de curso
+    curso_col = None
+    possible_names = ['curso_graduacao', 'CURSO DE GRADUAÇÃO OF', 'curso']
+    for name in possible_names:
+        if name in df.columns:
+            curso_col = name
+            break
     
     if not curso_col:
-        st.info("Coluna de curso não encontrada")
+        st.info(f"Coluna de curso não encontrada. Colunas disponíveis: {', '.join(df.columns[:10])}...")
         return
     
     curso_counts = df[curso_col].value_counts().head(15)
     
     st.subheader("Top 15 Cursos")
-    st.bar_chart(curso_counts)
+    fig = create_bar_chart(curso_counts.to_dict(), "Cursos com Mais Respondentes", '#2ecc71')
+    if fig:
+        st.plotly_chart(fig, use_container_width=True)
     
     with st.expander("Ver todos os cursos"):
         all_courses = df[curso_col].value_counts().reset_index()
@@ -216,123 +224,183 @@ def show_courses_analysis(df, tech_to_label):
 
 def show_entrepreneurship_analysis(df, tech_to_label):
     """Análise de empreendedorismo"""
-    st.markdown('<h2 class="section-header">🚀 Empreendedorismo</h2>', unsafe_allow_html=True)
+    st.markdown("## 🚀 Empreendedorismo")
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("Conceitos de Empreendedorismo")
-        conceitos = {
-            'conceito_empreendedorismo_abrir_negocio': 'Abrir negócio',
-            'conceito_empreendedorismo_impacto_social': 'Impacto social',
-            'conceito_empreendedorismo_melhorar_ambiente': 'Melhorar ambiente'
-        }
+        
+        # Buscar colunas de conceito (originais e mapeadas)
+        conceito_cols = {}
+        
+        # Padrão original
+        for col in df.columns:
+            if 'O que você entende como empreendedorismo' in col:
+                if 'abrir o próprio negócio' in col.lower():
+                    conceito_cols['Abrir Negócio'] = col
+                elif 'fazer algo bom para a sociedade' in col.lower():
+                    conceito_cols['Impacto Social'] = col
+                elif 'melhorar o ambiente' in col.lower():
+                    conceito_cols['Melhorar Ambiente'] = col
+        
+        # Padrão mapeado
+        if 'conceito_empreendedorismo_abrir_negocio' in df.columns:
+            conceito_cols['Abrir Negócio'] = 'conceito_empreendedorismo_abrir_negocio'
+        if 'conceito_empreendedorismo_impacto_social' in df.columns:
+            conceito_cols['Impacto Social'] = 'conceito_empreendedorismo_impacto_social'
+        if 'conceito_empreendedorismo_melhorar_ambiente' in df.columns:
+            conceito_cols['Melhorar Ambiente'] = 'conceito_empreendedorismo_melhorar_ambiente'
         
         conceito_data = {}
-        for col, label in conceitos.items():
-            if col in df.columns:
-                count = df[col].notna().sum()
+        for label, col in conceito_cols.items():
+            # Contar valores não nulos (incluindo strings)
+            count = df[col].notna().sum()
+            if count > 0:
                 conceito_data[label] = count
         
         if conceito_data:
-            st.bar_chart(conceito_data)
+            fig = create_bar_chart(conceito_data, "Conceitos de Empreendedorismo", '#e74c3c')
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Dados não encontrados. Colunas procuradas: conceitos de empreendedorismo")
     
     with col2:
         st.subheader("Fundadores/Sócios")
-        fundador_col = 'socio_ou_fundador' if 'socio_ou_fundador' in df.columns else None
+        
+        # Buscar coluna de fundador
+        fundador_col = None
+        possible_names = ['socio_ou_fundador', 'Você é sócio(a) ou fundador(a) de alguma empresa?Response']
+        for name in possible_names:
+            if name in df.columns:
+                fundador_col = name
+                break
+        
         if fundador_col:
             fundador_counts = df[fundador_col].value_counts()
-            st.bar_chart(fundador_counts)
+            fig = create_bar_chart(fundador_counts.to_dict(), "Fundadores/Sócios", '#3498db')
+            st.plotly_chart(fig, use_container_width=True)
             
             if 'Sim' in fundador_counts.index:
                 pct = (fundador_counts['Sim'] / len(df) * 100)
                 st.metric("Percentual de Fundadores", f"{pct:.1f}%")
         else:
-            st.info("Dados não disponíveis")
+            st.info("Coluna de fundador não encontrada")
 
 def show_professors_analysis(df, tech_to_label):
     """Análise dos professores"""
-    st.markdown('<h2 class="section-header">👨‍🏫 Avaliação dos Professores</h2>', unsafe_allow_html=True)
+    st.markdown("## 👨‍🏫 Avaliação dos Professores")
     
-    prof_cols = {
-        'professores_inconformismo_transformacao': 'Inconformismo',
-        'professores_visao_oportunidades': 'Visão',
-        'professores_pensamento_inovador_criativo': 'Inovação',
-        'professores_coragem_riscos': 'Coragem',
-        'professores_curiosidade': 'Curiosidade',
-        'professores_comunicacao_sociabilidade': 'Comunicação',
-        'professores_planejamento_atividades': 'Planejamento',
-        'professores_apoio_iniciativas': 'Apoio'
+    # Buscar colunas de características dos professores
+    prof_data = {}
+    
+    # Padrões de busca
+    patterns = {
+        'Inconformismo': ['inconformismo', 'transformá-la'],
+        'Visão': ['visão para oportunidades'],
+        'Inovação': ['pensamento inovador', 'criativo'],
+        'Coragem': ['coragem para tomar riscos'],
+        'Curiosidade': ['curiosidade'],
+        'Comunicação': ['comunicação', 'sociabilidade'],
+        'Planejamento': ['planejamento de atividades'],
+        'Apoio': ['apoio a iniciativas']
     }
     
-    prof_data = {}
-    for col, label in prof_cols.items():
-        if col in df.columns:
-            valores = pd.to_numeric(df[col], errors='coerce')
-            media = valores.mean()
-            if not pd.isna(media):
-                prof_data[label] = media
+    for label, keywords in patterns.items():
+        for col in df.columns:
+            if 'PROFESSORES' in col:
+                if any(keyword.lower() in col.lower() for keyword in keywords):
+                    valores = pd.to_numeric(df[col], errors='coerce')
+                    media = valores.mean()
+                    if not pd.isna(media) and media > 0:
+                        prof_data[label] = media
+                    break
     
     if prof_data:
         st.subheader("Características Empreendedoras")
-        st.bar_chart(prof_data)
+        fig = create_bar_chart(prof_data, "Avaliação Média dos Professores", '#9b59b6')
+        st.plotly_chart(fig, use_container_width=True)
         
         media_geral = np.mean(list(prof_data.values()))
         st.metric("Média Geral", f"{media_geral:.2f}")
     else:
-        st.info("Dados não disponíveis")
+        st.warning("⚠️ Dados não encontrados. Verifique se as colunas de avaliação dos professores estão no arquivo.")
+        with st.expander("Debug: Colunas que contêm 'PROFESSORES'"):
+            prof_cols = [col for col in df.columns if 'PROFESSOR' in col.upper()]
+            if prof_cols:
+                st.write(prof_cols[:5])
+            else:
+                st.write("Nenhuma coluna encontrada")
 
 def show_infrastructure_analysis(df, tech_to_label):
     """Análise de infraestrutura"""
-    st.markdown('<h2 class="section-header">🏢 Infraestrutura</h2>', unsafe_allow_html=True)
+    st.markdown("## 🏢 Infraestrutura")
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.subheader("Infraestrutura Geral")
-        infra_cols = {
-            'infraestrutura_biblioteca': 'Biblioteca',
-            'infraestrutura_labs_informatica': 'Labs Informática',
-            'infraestrutura_labs_pesquisa_exper': 'Labs Pesquisa',
-            'infraestrutura_espacos_convivencia': 'Espaços Convivência',
-            'infraestrutura_restaurante': 'Restaurante'
+        
+        # Buscar colunas de infraestrutura
+        infra_data = {}
+        infra_keywords = {
+            'Biblioteca': 'biblioteca',
+            'Labs Informática': ['laboratórios de informática', 'labs informática'],
+            'Labs Pesquisa': ['laboratórios de pesquisa', 'experimentação'],
+            'Espaços Convivência': ['espaços', 'convivência'],
+            'Restaurante': 'restaurante'
         }
         
-        infra_data = {}
-        for col, label in infra_cols.items():
-            if col in df.columns:
-                valores = pd.to_numeric(df[col], errors='coerce')
-                media = valores.mean()
-                if not pd.isna(media):
-                    infra_data[label] = media
+        for label, keywords in infra_keywords.items():
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            
+            for col in df.columns:
+                if 'infraestrutura' in col.lower() or 'Como você avalia a qualidade da infraestrutura' in col:
+                    if any(kw.lower() in col.lower() for kw in keywords):
+                        valores = pd.to_numeric(df[col], errors='coerce')
+                        media = valores.mean()
+                        if not pd.isna(media) and media > 0:
+                            infra_data[label] = media
+                        break
         
         if infra_data:
-            st.bar_chart(infra_data)
+            fig = create_bar_chart(infra_data, "Avaliação da Infraestrutura", '#16a085')
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Dados não disponíveis")
+            st.warning("⚠️ Dados não encontrados")
     
     with col2:
         st.subheader("Acessibilidade (PCD)")
-        acess_cols = {
-            'acessibilidade_calcadas_vias': 'Calçadas',
-            'acessibilidade_vias_acesso_edificacoes': 'Vias Acesso',
-            'acessibilidade_rota_interna': 'Rotas Internas',
-            'acessibilidade_sanitarios': 'Sanitários',
-            'acessibilidade_elevadores_rampas': 'Elevadores'
+        
+        # Buscar colunas de acessibilidade
+        acess_data = {}
+        acess_keywords = {
+            'Calçadas': 'calçadas',
+            'Vias Acesso': ['vias de acesso', 'edificações'],
+            'Rotas Internas': 'rota acessível',
+            'Sanitários': 'sanitários',
+            'Elevadores': ['elevadores', 'rampas']
         }
         
-        acess_data = {}
-        for col, label in acess_cols.items():
-            if col in df.columns:
-                valores = pd.to_numeric(df[col], errors='coerce')
-                media = valores.mean()
-                if not pd.isna(media):
-                    acess_data[label] = media
+        for label, keywords in acess_keywords.items():
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            
+            for col in df.columns:
+                if 'deficiência' in col.lower() or 'acessibilidade' in col.lower():
+                    if any(kw.lower() in col.lower() for kw in keywords):
+                        valores = pd.to_numeric(df[col], errors='coerce')
+                        media = valores.mean()
+                        if not pd.isna(media) and media > 0:
+                            acess_data[label] = media
+                        break
         
         if acess_data:
-            st.bar_chart(acess_data)
+            fig = create_bar_chart(acess_data, "Avaliação de Acessibilidade", '#27ae60')
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Dados não disponíveis")
+            st.warning("⚠️ Dados não encontrados")
 
 # ===== MAIN =====
 def main():
@@ -352,10 +420,16 @@ def main():
         use_github = st.checkbox("📦 Usar arquivo do GitHub", value=True)
         
         if use_github:
-            github_path = st.text_input(
-                "Caminho no GitHub",
-                value="JOAO-cefet-main/Dados CEFET_MG  Sem dados pessoais 2  Copia.xlsx",
-                help="Caminho relativo no repositório"
+            github_paths = [
+                "JOAO-cefet-main/data/dados_cefet.xlsx",
+                "JOAO-cefet-main/Dados CEFET_MG  Sem dados pessoais 2  Copia.xlsx",
+                "data/dados_cefet.xlsx"
+            ]
+            
+            github_path = st.selectbox(
+                "Selecione o arquivo",
+                github_paths,
+                help="Arquivos disponíveis no repositório"
             )
         
         # Opção 2: Upload manual
@@ -363,7 +437,7 @@ def main():
         uploaded_file = st.file_uploader(
             "📤 Upload arquivo Excel",
             type=['xlsx', 'xls'],
-            help="Arquivo deve conter a coluna 'respondent_id'"
+            help="Qualquer arquivo .xlsx com a estrutura correta"
         )
         
         st.markdown("---")
@@ -380,10 +454,10 @@ def main():
         if github_file.exists():
             with st.spinner('📥 Carregando arquivo do GitHub...'):
                 df = load_excel(str(github_file))
-                source_info = f"📦 Arquivo do GitHub: {github_path}"
+                source_info = f"📦 Arquivo: {github_path}"
         else:
             st.error(f"❌ Arquivo não encontrado: {github_path}")
-            st.info("💡 Verifique se o caminho está correto ou faça upload manual.")
+            st.info("💡 Tente outro arquivo ou faça upload manual.")
     
     # Se upload manual
     if uploaded_file:
@@ -398,17 +472,17 @@ def main():
         with st.spinner('🔄 Aplicando mapeamento de colunas...'):
             df = apply_mapping(df, col_to_tech)
         
-        # Processar
-        with st.spinner('⚙️ Removendo duplicatas...'):
+        # Processar (SEM remover duplicatas!)
+        with st.spinner('⚙️ Processando dados...'):
             df_processed, stats = process_data(df)
         
         if df_processed is None:
             st.stop()
         
-        st.success(f"✅ {stats['total_unicos']:,} respondentes carregados!")
+        st.success(f"✅ {stats['total_linhas']:,} respostas de {stats['total_unicos']:,} respondentes carregadas!")
         
-        if stats['duplicadas'] > 0:
-            st.warning(f"⚠️ {stats['duplicadas']:,} duplicatas removidas")
+        if stats['respostas_multiplas'] > 0:
+            st.info(f"📋 {stats['respostas_multiplas']:,} respostas múltiplas (válidas) detectadas")
         
         # Tabs de navegação
         tabs = st.tabs([
@@ -453,7 +527,6 @@ def main():
         )
     
     else:
-        # Tela inicial
         st.info("👆 Configure a fonte de dados no menu lateral")
         
         col1, col2 = st.columns(2)
@@ -462,12 +535,10 @@ def main():
             st.markdown("### 📋 Opções")
             st.markdown("""
             **Opção 1: Arquivo do GitHub** ✅
-            - Marque "Usar arquivo do GitHub"
-            - Configure o caminho correto
+            - Selecione um dos arquivos disponíveis
             
             **Opção 2: Upload Manual** 📤
-            - Desmarque "Usar arquivo do GitHub"
-            - Faça upload do arquivo .xlsx
+            - Faça upload de qualquer arquivo .xlsx
             """)
         
         with col2:
