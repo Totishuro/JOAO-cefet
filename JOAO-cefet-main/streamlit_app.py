@@ -102,12 +102,88 @@ def process_data(df):
     return df, stats  # Retorna o DataFrame COMPLETO
 
 # ===== Funções de Plotagem =====
-def create_bar_chart(data_dict, title, color='#1f77b4'):
-    """Cria gráfico de barras com Plotly"""
+def break_long_text(text, max_length=20):
+    """Quebra texto longo em múltiplas linhas"""
+    if not isinstance(text, str):
+        text = str(text)
+    
+    if len(text) <= max_length:
+        return text
+    
+    words = text.split()
+    lines = []
+    current_line = []
+    current_length = 0
+    
+    for word in words:
+        if current_length + len(word) + 1 <= max_length:
+            current_line.append(word)
+            current_length += len(word) + 1
+        else:
+            if current_line:
+                lines.append(' '.join(current_line))
+            current_line = [word]
+            current_length = len(word)
+    
+    if current_line:
+        lines.append(' '.join(current_line))
+    
+    return '<br>'.join(lines)
+
+def create_horizontal_bar_chart(data_dict, title, color='#1f77b4', max_items=15):
+    """Cria gráfico de barras HORIZONTAL (melhor para textos longos)"""
     if not data_dict:
         return None
     
     df_plot = pd.DataFrame(list(data_dict.items()), columns=['Categoria', 'Valor'])
+    df_plot = df_plot.sort_values('Valor', ascending=True).tail(max_items)  # Top items
+    
+    fig = go.Figure(data=[
+        go.Bar(
+            y=df_plot['Categoria'],
+            x=df_plot['Valor'],
+            orientation='h',
+            marker_color=color,
+            text=df_plot['Valor'],
+            textposition='outside',
+            hovertemplate='<b>%{y}</b><br>Quantidade: %{x}<extra></extra>'
+        )
+    ])
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title="Quantidade",
+        yaxis_title="",
+        height=max(400, len(df_plot) * 30),  # Altura dinâmica
+        xaxis=dict(
+            rangemode='tozero',
+            gridcolor='lightgray'
+        ),
+        margin=dict(l=200, r=30, t=60, b=60),  # Margem esquerda para nomes longos
+        plot_bgcolor='white',
+        hovermode='y unified'
+    )
+    
+    fig.update_yaxes(
+        showgrid=False,
+        showline=True,
+        linewidth=1,
+        linecolor='black',
+        tickmode='linear'
+    )
+    
+    return fig
+
+def create_bar_chart(data_dict, title, color='#1f77b4'):
+    """Cria gráfico de barras com Plotly e quebra de linha nos rótulos"""
+    if not data_dict:
+        return None
+    
+    df_plot = pd.DataFrame(list(data_dict.items()), columns=['Categoria', 'Valor'])
+    
+    # Quebrar textos longos em múltiplas linhas
+    df_plot['Categoria_Original'] = df_plot['Categoria']
+    df_plot['Categoria'] = df_plot['Categoria'].apply(break_long_text)
     
     fig = go.Figure(data=[
         go.Bar(
@@ -115,7 +191,9 @@ def create_bar_chart(data_dict, title, color='#1f77b4'):
             y=df_plot['Valor'],
             marker_color=color,
             text=df_plot['Valor'],
-            textposition='outside'
+            textposition='outside',
+            hovertemplate='<b>%{customdata}</b><br>Quantidade: %{y}<extra></extra>',
+            customdata=df_plot['Categoria_Original']
         )
     ])
     
@@ -123,10 +201,22 @@ def create_bar_chart(data_dict, title, color='#1f77b4'):
         title=title,
         xaxis_title="",
         yaxis_title="Quantidade",
-        xaxis_tickangle=-45,
-        height=400,
-        yaxis=dict(rangemode='tozero'),  # Não mostrar valores negativos
-        margin=dict(b=100)  # Margem inferior para rótulos inclinados
+        xaxis_tickangle=0,  # Sem inclinação quando tem quebra de linha
+        height=450,
+        yaxis=dict(
+            rangemode='tozero',  # Não mostrar valores negativos
+            gridcolor='lightgray'
+        ),
+        margin=dict(b=120, l=60, r=30, t=60),  # Margem maior embaixo
+        plot_bgcolor='white',
+        hovermode='x unified'
+    )
+    
+    fig.update_xaxes(
+        showgrid=False,
+        showline=True,
+        linewidth=1,
+        linecolor='black'
     )
     
     return fig
@@ -212,7 +302,8 @@ def show_courses_analysis(df, tech_to_label):
     curso_counts = df[curso_col].value_counts().head(15)
     
     st.subheader("Top 15 Cursos")
-    fig = create_bar_chart(curso_counts.to_dict(), "Cursos com Mais Respondentes", '#2ecc71')
+    # Usar gráfico HORIZONTAL para nomes de cursos longos
+    fig = create_horizontal_bar_chart(curso_counts.to_dict(), "Cursos com Mais Respondentes", '#2ecc71', max_items=15)
     if fig:
         st.plotly_chart(fig, use_container_width=True)
     
