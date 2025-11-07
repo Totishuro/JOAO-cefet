@@ -321,14 +321,25 @@ def kpi_perfil(df: pd.DataFrame, id_col: str):
             t["Faixa"] = pd.cut(t[idade_col], bins=[0, 19, 25, 30, 120], labels=["Até 19", "20–25", "26–30", "31+"])
             counts = t.groupby("Faixa")[id_col].nunique().reset_index().rename(columns={id_col: "Respondentes"})
             counts["%"] = (counts["Respondentes"] / counts["Respondentes"].sum() * 100).round(1)
-            fig = go.Figure([go.Bar(x=counts["Faixa"], y=counts["Respondentes"], text=[f"{r} ({p}%)" for r, p in zip(counts["Respondentes"], counts["%"])], textposition="outside", marker_color="#764ba2")])
-            fig.update_layout(
-                **base_layout(),
-                height=420,
-                margin=dict(l=40, r=20, t=40, b=120),  # dá espaço pros rótulos no eixo X
-                xaxis=dict(automargin=True, tickangle=-30)  # inclina rótulos e ativa automargin
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            fig = go.Figure([
+                    go.Bar(
+                        x=counts["Faixa"],
+                        y=counts["Respondentes"],
+                        text=[f"{r} ({p}%)" for r, p in zip(counts["Respondentes"], counts["%"])],
+                        textposition="outside",
+                        marker_color="#764ba2"
+                        )    
+                    ])
+                fig.update_layout(
+                    **base_layout(),
+                    height=420,
+                    margin=dict(l=40, r=20, t=40, b=120),  # mais espaço pros rótulos do eixo X
+                    xaxis=dict(automargin=True, tickangle=-30)
+                )
+                fig.update_traces(cliponaxis=False)  # evita cortar o texto “outside”
+                fig.update_yaxes(range=[0, counts["Respondentes"].max() * 1.18], automargin=True)  # folga no topo
+                st.plotly_chart(fig, use_container_width=True)
+
             st.dataframe(counts, hide_index=True, use_container_width=True)
         else:
             st.info("📎 Coluna de idade não encontrada.")
