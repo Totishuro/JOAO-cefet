@@ -136,8 +136,11 @@ def base_layout():
         font=dict(color=font_color, size=12),
         xaxis=dict(gridcolor=grid, linecolor=axis, automargin=True),
         yaxis=dict(gridcolor=grid, linecolor=axis, automargin=True),
-        margin=dict(l=20, r=20, t=40, b=60),
+        # ⬇️ Removido 'margin' para evitar conflito com chamadas que definem margin explicitamente
+        # margin=dict(l=20, r=20, t=40, b=60),
     )
+
+
 
 def wrap(text: str, width: int = 28) -> str:
     if not isinstance(text, str):
