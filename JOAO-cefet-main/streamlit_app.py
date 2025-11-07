@@ -322,23 +322,28 @@ def kpi_perfil(df: pd.DataFrame, id_col: str):
             counts = t.groupby("Faixa")[id_col].nunique().reset_index().rename(columns={id_col: "Respondentes"})
             counts["%"] = (counts["Respondentes"] / counts["Respondentes"].sum() * 100).round(1)
             fig = go.Figure([
-                    go.Bar(
-                        x=counts["Faixa"],
-                        y=counts["Respondentes"],
-                        text=[f"{r} ({p}%)" for r, p in zip(counts["Respondentes"], counts["%"])],
-                        textposition="outside",
-                        marker_color="#764ba2"
-                        )    
-                    ])
-                fig.update_layout(
-                    **base_layout(),
-                    height=420,
-                    margin=dict(l=40, r=20, t=40, b=120),  # mais espaço pros rótulos do eixo X
-                    xaxis=dict(automargin=True, tickangle=-30)
+                go.Bar(
+                    x=counts["Faixa"],
+                    y=counts["Respondentes"],
+                    text=[f"{r} ({p}%)" for r, p in zip(counts["Respondentes"], counts["%"])],
+                    textposition="outside",
+                    marker_color="#764ba2"
                 )
-                fig.update_traces(cliponaxis=False)  # evita cortar o texto “outside”
-                fig.update_yaxes(range=[0, counts["Respondentes"].max() * 1.18], automargin=True)  # folga no topo
-                st.plotly_chart(fig, use_container_width=True)
+            ])
+                    
+            # Evita conflito de kwargs: duas chamadas
+            fig.update_layout(**base_layout())
+            fig.update_layout(
+                height=420,
+                margin=dict(l=40, r=20, t=40, b=120),
+                xaxis=dict(automargin=True, tickangle=-30)
+            )
+                    
+            # Não cortar texto “outside” e dar folga no topo
+            fig.update_traces(cliponaxis=False)
+            fig.update_yaxes(range=[0, max(1, counts["Respondentes"].max() * 1.18)], automargin=True)
+            
+            st.plotly_chart(fig, use_container_width=True)
 
             st.dataframe(counts, hide_index=True, use_container_width=True)
         else:
